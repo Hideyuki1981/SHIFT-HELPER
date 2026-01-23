@@ -49,7 +49,7 @@ name列に「ヘルプ」の架空人物を追加するとヘルプ必要枠が�
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
 st.title("📅 シフト自動作成ツール")
-st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
+st.markdown("staff.xlsx をアップロードして、作成ボタンを押してください。")
 
 # =====================
 # マニュアル表示機能 (ポップアップ)
@@ -341,5 +341,6 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
+
 
 
