@@ -31,6 +31,11 @@ with st.sidebar:
     # ファイルアップロード
     uploaded_file = st.file_uploader("staff.xlsx をアップロード", type=["xlsx"])
 
+    st.markdown("---")
+    st.write("🔧 **詳細設定**")
+    # 【追加機能①】乱数シード（結果を変えるための数値）
+    random_seed = st.number_input("再計算用乱数 (結果を変えたい時は数字を変更)", value=0, step=1)
+
 # 実行ボタン
 if st.button("シフトを作成する"):
     if uploaded_file is None:
@@ -53,7 +58,6 @@ if st.button("シフトを作成する"):
         # =====================
         # Excel読み込み
         # =====================
-        # アップロードされたファイルから読み込む
         staff_df = pd.read_excel(uploaded_file, sheet_name="staff")
         staff = staff_df["name"].tolist()
 
@@ -71,12 +75,10 @@ if st.button("シフトを作成する"):
                 else:
                     req_input[s][d] = str(val).strip()
 
-        # 前月引継ぎなど
         prev_night = dict(zip(staff_df["name"], staff_df["prev_night"] if "prev_night" in staff_df.columns else [0]*len(staff)))
         prev_consecutive = dict(zip(staff_df["name"], staff_df["prev_consecutive"] if "prev_consecutive" in staff_df.columns else [0]*len(staff)))
         night_only = dict(zip(staff_df["name"], staff_df["night_only"] if "night_only" in staff_df.columns else [0]*len(staff)))
 
-        # 可否・曜日制限
         can = {}
         weekday_can = {}
         for _, r in staff_df.iterrows():
@@ -93,23 +95,19 @@ if st.button("シフトを作成する"):
         x = {}
         work_flag = {}
 
-        # 変数定義
         for s in staff:
             for d in range(DAYS):
                 for sh in SHIFT_TYPES:
                     x[s, d, sh] = model.NewBoolVar(f"x_{s}_{d}_{sh}") if can[s][sh] == 1 else None
 
-        # 制約：1日1シフト
         for s in staff:
             for d in range(DAYS):
                 model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
 
-        # 制約：必要人数
         for d in range(DAYS):
             for sh in SHIFT_TYPES:
                 model.Add(sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None) == REQUIRED[sh])
 
-        # 勤務フラグ・夜勤明け
         for s in staff:
             for d in range(DAYS):
                 work_flag[s, d] = model.NewBoolVar(f"work_{s}_{d}")
@@ -120,7 +118,6 @@ if st.button("シフトを作成する"):
                     is_after_night = x[s, d-1, "夜"] if x[s, d-1, "夜"] is not None else 0
                 model.Add(work_flag[s, d] == is_shifted + is_after_night)
 
-        # 制約：希望反映
         for s in staff:
             for d in range(DAYS):
                 inp = req_input[s][d]
@@ -135,13 +132,11 @@ if st.button("シフトを作成する"):
                             if other_sh != inp and x[s, d, other_sh] is not None:
                                 model.Add(x[s, d, other_sh] == 0)
 
-        # 制約：夜勤翌日休み
         for s in staff:
             for d in range(DAYS - 1):
                 if x[s, d, "夜"] is not None:
                     model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) <= 1 - x[s, d, "夜"])
 
-        # 制約：連勤
         for s in staff:
             limit = int(limit_consecutive[s]) if pd.notna(limit_consecutive[s]) else 6
             ng_days = limit + 1
@@ -158,13 +153,11 @@ if st.button("シフトを作成する"):
                     window = [work_flag[s, k] for k in range(check_len)]
                     model.AddBoolOr([w.Not() for w in window])
 
-        # 制約：曜日
         for s in staff:
             for d in range(DAYS):
                 if weekday_can[s][weekdays[d]] == 0:
                     model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
 
-        # 制約：公休
         for s in staff:
             total_work = sum(work_flag[s, d] for d in range(DAYS))
             paid_leave = sum(1 for d in range(DAYS) if req_input[s][d] == "有")
@@ -173,7 +166,6 @@ if st.button("シフトを作成する"):
             else:
                 model.Add(total_work <= DAYS - off_days[s] - paid_leave)
 
-        # 目的関数
         night_count = {}
         for s in staff:
             night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
@@ -219,8 +211,11 @@ if st.button("シフトを作成する"):
         # Solve
         # =====================
         solver = cp_model.CpSolver()
-        # 計算時間の上限を設定（Webアプリ用）
         solver.parameters.max_time_in_seconds = 30.0 
+        
+        # 【追加機能①の実装】乱数シードの設定
+        solver.parameters.random_seed = int(random_seed)
+
         status = solver.Solve(model)
 
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -228,8 +223,12 @@ if st.button("シフトを作成する"):
 
             # 結果データフレーム作成
             result = []
+            night_counts = [] # 夜勤回数リスト
+            holiday_counts = [] # 休日数リスト
+
             for s in staff:
                 row = []
+                # 1. シフトパターンの取得
                 for d in range(DAYS):
                     v = ""
                     for sh in SHIFT_TYPES:
@@ -237,30 +236,54 @@ if st.button("シフトを作成する"):
                             v = sh
                     row.append(v)
                 result.append(row)
+                
+                # 2. カウント情報の取得
+                n_count = solver.Value(night_count[s])
+                w_days = sum(solver.Value(work_flag[s, d]) for d in range(DAYS))
+                h_count = DAYS - w_days # 月の日数 - 勤務日数 = 休み
+
+                night_counts.append(n_count)
+                holiday_counts.append(h_count)
             
             df_out = pd.DataFrame(result, index=staff, columns=[f"{i+1}日" for i in range(DAYS)])
             
-            # ブラウザ上でプレビュー表示
+            # 【追加機能②の実装】Web表示用に列を追加
+            df_out["夜勤回数"] = night_counts
+            df_out["休日数"] = holiday_counts
+
+            # Webブラウザ上での表示
             st.dataframe(df_out)
 
-            # Excel出力用の処理（メモリ上で作成）
+            # --- Excel出力処理 ---
+            # ダウンロード用Excelにはカウント列を含めるか、シートを分けるかはお好みですが、
+            # ここでは「シフト表」として見やすくするため、カウント列を除外した純粋なシフト部分だけをExcel化し、
+            # 別の場所にカウントを記載する、あるいは右端に追加するなど調整可能です。
+            # 今回はシンプルに、Web表示と同じ内容（右端にカウント付き）でExcel化します。
+            
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_out.to_excel(writer, sheet_name='Result')
             
-            # 書式設定（openpyxl）
             output.seek(0)
             wb = load_workbook(output)
             ws = wb.active
             green = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
 
+            # Excelの色付け処理（列ズレに注意）
+            # データフレームに2列追加したので、シフトが入っている列は 2列目 ～ (DAYS+1)列目 までです
+            # 夜勤回数・休日数はそのさらに右側にあります
+            
             for i, s in enumerate(staff, start=2):
                 off_need = off_days[s]
                 off_cnt = 0
+                
+                # シフト部分の日付ループ
                 for d in range(DAYS):
+                    # Pythonの列番号(0始まり)に対応するExcel列番号は d+2 (index列があるため)
                     cell = ws.cell(row=i, column=d+2)
                     inp = req_input[s][d]
                     
+                    # 前日夜勤チェック
                     if d > 0 and ws.cell(row=i, column=d+1).value == "夜":
                         cell.value = "明"
                         cell.fill = green
@@ -279,12 +302,10 @@ if st.button("シフトを作成する"):
                         cell.fill = green
                         off_cnt += 1
             
-            # メモリバッファに保存
             final_output = BytesIO()
             wb.save(final_output)
             final_output.seek(0)
 
-            # ダウンロードボタン表示
             st.download_button(
                 label="📥 Excelファイルをダウンロード",
                 data=final_output,
