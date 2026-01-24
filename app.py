@@ -31,13 +31,13 @@ MANUAL_TEXT = """
 ### 3. 希望シフト
 * **req_shift_1 ～ 31** に入力します
 * **空欄**: おまかせ
-* **休**: 希望休 (黄色で表示されます)
+* **休**: 希望休 (黄色で表示)
 * **有**: 有給
 * **早/日/遅/夜**: シフト固定
 
 ### 4. 注意点
-* **夜勤の後は「明・休」セット**になります（夜勤→休み→休み）。
-* 「夜勤不可」の人に「夜」を指定するとエラーになります。
+* 夜勤の翌日は「明け（休み）」確定です。
+* **その次の休み（2連休）は「可能な限り」** 反映されます。
 """
 
 # =====================
@@ -45,21 +45,18 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.2)")
+st.title("📅 シフト自動作成ツール (Ver.3)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
-# サイドバー：設定入力
+# サイドバー
 # =====================
 with st.sidebar:
     st.header("設定")
-    
     with st.expander("📖 使い方マニュアルを見る"):
         st.markdown(MANUAL_TEXT)
-
     st.markdown("---")
-
-    # 年月の入力
+    
     default_year = datetime.date.today().year
     default_month = datetime.date.today().month + 1
     if default_month > 12:
@@ -69,9 +66,8 @@ with st.sidebar:
     YEAR = st.number_input("作成する【年】", value=default_year, step=1)
     MONTH = st.number_input("作成する【月】", value=default_month, min_value=1, max_value=12, step=1)
     
-    # ファイルアップロード
     uploaded_file = st.file_uploader("staff.xlsx をアップロード", type=["xlsx"])
-
+    
     st.markdown("---")
     st.write("🔧 **詳細設定**")
     random_seed = st.number_input("再計算用乱数 (結果を変えたい時は数字を変更)", value=0, step=1)
@@ -136,14 +132,17 @@ if st.button("シフトを作成する", type="primary"):
                 for sh in SHIFT_TYPES:
                     x[s, d, sh] = model.NewBoolVar(f"x_{s}_{d}_{sh}") if can[s][sh] == 1 else None
 
+        # 1日1シフト
         for s in staff:
             for d in range(DAYS):
                 model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
 
+        # 必要人数
         for d in range(DAYS):
             for sh in SHIFT_TYPES:
                 model.Add(sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None) == REQUIRED[sh])
 
+        # 勤務フラグ作成
         for s in staff:
             for d in range(DAYS):
                 work_flag[s, d] = model.NewBoolVar(f"work_{s}_{d}")
@@ -154,6 +153,7 @@ if st.button("シフトを作成する", type="primary"):
                     is_after_night = x[s, d-1, "夜"] if x[s, d-1, "夜"] is not None else 0
                 model.Add(work_flag[s, d] == is_shifted + is_after_night)
 
+        # 希望反映
         for s in staff:
             for d in range(DAYS):
                 inp = req_input[s][d]
@@ -168,18 +168,30 @@ if st.button("シフトを作成する", type="primary"):
                             if other_sh != inp and x[s, d, other_sh] is not None:
                                 model.Add(x[s, d, other_sh] == 0)
 
-        # 【修正】夜勤パターン: 夜勤(d) → 明け(d+1) → 休み(d+2) の「明休」固定
+        # ===============================================
+        # 【修正】夜勤ルール（ここを緩和しました）
+        # ===============================================
+        next_day_off_penalty = [] # 明け休みが取れない時のペナルティ（2連休崩れ）
+
         for s in staff:
             for d in range(DAYS):
                 if x[s, d, "夜"] is not None:
-                    # 1. 夜勤の翌日(d+1)は勤務不可
+                    # 1. 【絶対】夜勤の翌日(d+1)は勤務不可（明け）
                     if d + 1 < DAYS:
                         model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
                     
-                    # 2. 夜勤の翌々日(d+2)も勤務不可（ここを追加）
+                    # 2. 【努力目標】夜勤の翌々日(d+2)も休みにしたい
                     if d + 2 < DAYS:
-                        model.Add(sum(x[s, d+2, sh] for sh in SHIFT_TYPES if x[s, d+2, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
+                        # もし「夜勤(d)」かつ「勤務(d+2)」なら、ペナルティ変数(violation)を1にする
+                        violation = model.NewBoolVar(f"violation_{s}_{d}")
+                        # work_flag[s, d+2] が 1 なら violation も 1
+                        model.AddBoolAnd([x[s, d, "夜"], work_flag[s, d+2]]).OnlyEnforceIf(violation)
+                        # それ以外なら violation は 0
+                        model.AddBoolOr([x[s, d, "夜"].Not(), work_flag[s, d+2].Not()]).OnlyEnforceIf(violation.Not())
+                        
+                        next_day_off_penalty.append(violation)
 
+        # 連勤制限
         for s in staff:
             limit = int(limit_consecutive[s]) if pd.notna(limit_consecutive[s]) else 6
             ng_days = limit + 1
@@ -196,11 +208,13 @@ if st.button("シフトを作成する", type="primary"):
                     window = [work_flag[s, k] for k in range(check_len)]
                     model.AddBoolOr([w.Not() for w in window])
 
+        # 曜日制限
         for s in staff:
             for d in range(DAYS):
                 if weekday_can[s][weekdays[d]] == 0:
                     model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
 
+        # 公休数
         for s in staff:
             total_work = sum(work_flag[s, d] for d in range(DAYS))
             paid_leave = sum(1 for d in range(DAYS) if req_input[s][d] == "有")
@@ -209,7 +223,7 @@ if st.button("シフトを作成する", type="primary"):
             else:
                 model.Add(total_work <= DAYS - off_days[s] - paid_leave)
 
-        # 目的関数
+        # 変数定義（目的関数用）
         night_count = {}
         for s in staff:
             night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
@@ -244,10 +258,14 @@ if st.button("シフトを作成する", type="primary"):
         for s in night_only_staff:
             night_maximization_bonus.append(night_count[s])
 
+        # ===============================================
+        # 目的関数 (Minimize)
+        # ===============================================
         model.Minimize(
-            10 * sum(night_penalty) +
-            100 * sum(dispatch_penalty) +
-            100 * sum(balance_penalty)
+            10 * sum(night_penalty) +       # 夜勤専従以外の夜勤はなるべく減らす
+            100 * sum(dispatch_penalty) +   # 派遣のシフトはなるべく減らす
+            100 * sum(balance_penalty) +    # 夜勤回数のバラつきを減らす
+            500 * sum(next_day_off_penalty) # 【追加】2連休崩れに対する大きなペナルティ
             - 1000 * sum(night_maximization_bonus)
         )
 
@@ -261,25 +279,21 @@ if st.button("シフトを作成する", type="primary"):
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             st.success(f"✅ 作成成功！ (Status: {solver.StatusName(status)})")
 
-            # 【修正】集計用の辞書リストを用意
+            # 集計・表示処理
             count_cols = ["早", "日", "遅", "夜", "休", "有"]
             count_data = {c: [] for c in count_cols}
-            
             result = []
 
             for s in staff:
                 row = []
-                # 個人のカウント用変数を初期化
                 p_counts = {c: 0 for c in count_cols}
                 
                 for d in range(DAYS):
                     v = ""
-                    # ユーザー希望が「有」なら、カウントして表示も「有」
                     if req_input[s][d] == "有":
                         v = "有"
                         p_counts["有"] += 1
                     else:
-                        # シフトが入っているか確認
                         is_work = False
                         for sh in SHIFT_TYPES:
                             if x[s, d, sh] is not None and solver.Value(x[s, d, sh]) == 1:
@@ -288,10 +302,8 @@ if st.button("シフトを作成する", type="primary"):
                                 is_work = True
                                 break
                         
-                        # シフトが入っていない場合
                         if not is_work:
-                            # 前日が夜勤なら「明」表記にする（カウントは「休」扱い）
-                            # d-1が夜だったかチェック
+                            # 明け判定
                             prev_is_night = False
                             if d > 0:
                                 if x[s, d-1, "夜"] is not None and solver.Value(x[s, d-1, "夜"]) == 1:
@@ -301,24 +313,18 @@ if st.button("シフトを作成する", type="primary"):
                                     prev_is_night = True
                             
                             if prev_is_night:
-                                v = "明" # 表記は明
+                                v = "明"
                             else:
-                                v = "休" # 表記は休
-                                
+                                v = "休"
                             p_counts["休"] += 1
                     
                     row.append(v)
-                
                 result.append(row)
                 
-                # 集計リストに追加
                 for c in count_cols:
                     count_data[c].append(p_counts[c])
             
-            # データフレーム作成（シフト部分）
             df_out = pd.DataFrame(result, index=staff, columns=[f"{i+1}日" for i in range(DAYS)])
-            
-            # 【修正】集計列を結合
             for c in count_cols:
                 df_out[c] = count_data[c]
 
@@ -333,10 +339,9 @@ if st.button("シフトを作成する", type="primary"):
             wb = load_workbook(output)
             ws = wb.active
             
-            # 色の定義
-            green_fill = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid") # 薄い緑（自動休）
-            yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # 薄い黄色（希望休）
-            orange_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid") # 薄いオレンジ（有給）
+            green_fill = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
+            yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+            orange_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
             for i, s in enumerate(staff, start=2):
                 for d in range(DAYS):
@@ -344,17 +349,12 @@ if st.button("シフトを作成する", type="primary"):
                     val = cell.value
                     inp = req_input[s][d]
                     
-                    # 1. 有給（希望入力の「有」）
                     if inp == "有":
                         cell.fill = orange_fill
                         continue
-
-                    # 2. 希望休（希望入力の「休」）→ 黄色
                     if inp == "休":
                         cell.fill = yellow_fill
                         continue
-                    
-                    # 3. 自動休・明け（システムが決めた休み）→ 緑色
                     if val == "休" or val == "明":
                         cell.fill = green_fill
 
@@ -368,9 +368,8 @@ if st.button("シフトを作成する", type="primary"):
                 file_name=f"shift_{YEAR}_{MONTH}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         else:
-            st.error("❌ 解が見つかりませんでした。条件（特に「明休」固定による人手不足）を確認してください。")
+            st.error("❌ 解が見つかりませんでした。公休数が足りない、またはスタッフ人数が不足している可能性があります。")
 
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
