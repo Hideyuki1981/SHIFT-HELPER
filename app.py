@@ -31,13 +31,14 @@ MANUAL_TEXT = """
 ### 3. 希望シフト
 * **req_shift_1 ～ 31** に入力します
 * **空欄**: おまかせ
-* **休**: 希望休 (黄色で表示)
-* **有**: 有給
+* **休**: 希望休 (黄色)
+* **有**: 有給 (オレンジ)
 * **早/日/遅/夜**: シフト固定
 
 ### 4. 注意点
+* **「休」カウントに「明」は含まれません。**
 * 夜勤の翌日は「明け（休み）」確定です。
-* **その次の休み（2連休）は「可能な限り」** 反映されます。
+* その次の休み（2連休）は可能な限り反映されます。
 """
 
 # =====================
@@ -45,7 +46,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.3)")
+st.title("📅 シフト自動作成ツール (Ver.5)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -168,27 +169,19 @@ if st.button("シフトを作成する", type="primary"):
                             if other_sh != inp and x[s, d, other_sh] is not None:
                                 model.Add(x[s, d, other_sh] == 0)
 
-        # ===============================================
-        # 【修正】夜勤ルール（ここを緩和しました）
-        # ===============================================
-        next_day_off_penalty = [] # 明け休みが取れない時のペナルティ（2連休崩れ）
-
+        # 夜勤ルール
+        next_day_off_penalty = [] 
         for s in staff:
             for d in range(DAYS):
                 if x[s, d, "夜"] is not None:
-                    # 1. 【絶対】夜勤の翌日(d+1)は勤務不可（明け）
+                    # 明けは絶対休み
                     if d + 1 < DAYS:
                         model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
-                    
-                    # 2. 【努力目標】夜勤の翌々日(d+2)も休みにしたい
+                    # 翌々日は可能な限り休み
                     if d + 2 < DAYS:
-                        # もし「夜勤(d)」かつ「勤務(d+2)」なら、ペナルティ変数(violation)を1にする
                         violation = model.NewBoolVar(f"violation_{s}_{d}")
-                        # work_flag[s, d+2] が 1 なら violation も 1
                         model.AddBoolAnd([x[s, d, "夜"], work_flag[s, d+2]]).OnlyEnforceIf(violation)
-                        # それ以外なら violation は 0
                         model.AddBoolOr([x[s, d, "夜"].Not(), work_flag[s, d+2].Not()]).OnlyEnforceIf(violation.Not())
-                        
                         next_day_off_penalty.append(violation)
 
         # 連勤制限
@@ -223,7 +216,7 @@ if st.button("シフトを作成する", type="primary"):
             else:
                 model.Add(total_work <= DAYS - off_days[s] - paid_leave)
 
-        # 変数定義（目的関数用）
+        # 目的関数
         night_count = {}
         for s in staff:
             night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
@@ -258,14 +251,11 @@ if st.button("シフトを作成する", type="primary"):
         for s in night_only_staff:
             night_maximization_bonus.append(night_count[s])
 
-        # ===============================================
-        # 目的関数 (Minimize)
-        # ===============================================
         model.Minimize(
-            10 * sum(night_penalty) +       # 夜勤専従以外の夜勤はなるべく減らす
-            100 * sum(dispatch_penalty) +   # 派遣のシフトはなるべく減らす
-            100 * sum(balance_penalty) +    # 夜勤回数のバラつきを減らす
-            500 * sum(next_day_off_penalty) # 【追加】2連休崩れに対する大きなペナルティ
+            10 * sum(night_penalty) +
+            100 * sum(dispatch_penalty) +
+            100 * sum(balance_penalty) +
+            500 * sum(next_day_off_penalty)
             - 1000 * sum(night_maximization_bonus)
         )
 
@@ -279,7 +269,7 @@ if st.button("シフトを作成する", type="primary"):
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             st.success(f"✅ 作成成功！ (Status: {solver.StatusName(status)})")
 
-            # 集計・表示処理
+            # 【修正点】「明」列を削除
             count_cols = ["早", "日", "遅", "夜", "休", "有"]
             count_data = {c: [] for c in count_cols}
             result = []
@@ -314,9 +304,10 @@ if st.button("シフトを作成する", type="primary"):
                             
                             if prev_is_night:
                                 v = "明"
+                                # 明けはカウントしないので何もしない
                             else:
                                 v = "休"
-                            p_counts["休"] += 1
+                                p_counts["休"] += 1 # 通常の休みのみカウント
                     
                     row.append(v)
                 result.append(row)
@@ -369,7 +360,7 @@ if st.button("シフトを作成する", type="primary"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("❌ 解が見つかりませんでした。公休数が足りない、またはスタッフ人数が不足している可能性があります。")
+            st.error("❌ 解が見つかりませんでした。")
 
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
