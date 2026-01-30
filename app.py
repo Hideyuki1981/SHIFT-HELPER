@@ -46,7 +46,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.6)")
+st.title("📅 シフト自動作成ツール (Ver.7 曜日別設定対応)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -70,11 +70,24 @@ with st.sidebar:
     uploaded_file = st.file_uploader("staff.xlsx をアップロード", type=["xlsx"])
     
     st.markdown("---")
-    st.write("👥 **各シフトの必要人数**")
-    req_early = st.number_input("早番 (早)", value=1, min_value=0)
-    req_day   = st.number_input("日勤 (日)", value=1, min_value=0)
-    req_late  = st.number_input("遅番 (遅)", value=1, min_value=0)
-    req_night = st.number_input("夜勤 (夜)", value=2, min_value=0)
+    st.write("👥 **曜日別の必要人数設定**")
+    st.caption("セルをダブルクリックして値を変更できます")
+
+    # デフォルト値の設定 (行:シフト, 列:曜日)
+    # 早=1, 日=1, 遅=1, 夜=2 を初期値とする
+    default_req_data = {
+        "月": [1, 1, 1, 2],
+        "火": [1, 1, 1, 2],
+        "水": [1, 1, 1, 2],
+        "木": [1, 1, 1, 2],
+        "金": [1, 1, 1, 2],
+        "土": [1, 1, 1, 2],
+        "日": [1, 1, 1, 2]
+    }
+    df_req_default = pd.DataFrame(default_req_data, index=["早", "日", "遅", "夜"])
+    
+    # データエディタで編集可能にする
+    edited_req_df = st.data_editor(df_req_default, height=180)
 
     st.markdown("---")
     st.write("🔧 **詳細設定**")
@@ -83,16 +96,18 @@ with st.sidebar:
 # =====================
 # ヘルパー関数: モデル作成
 # =====================
-def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=False):
+def create_shift_model(staff_df, year, month, req_df, is_diagnostic=False):
     """
     モデルを作成する関数
-    is_diagnostic=True の場合、人数不足を許容して「不足数」を最小化するモデルを作成する
+    req_df: 曜日ごとの必要人数が入ったDataFrame
     """
     DAYS = calendar.monthrange(int(year), int(month))[1]
     SHIFT_TYPES = ["早", "日", "遅", "夜"]
+    WEEKDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
     
     base_date = datetime.date(int(year), int(month), 1)
-    weekdays = [(base_date + datetime.timedelta(days=i)).weekday() for i in range(DAYS)]
+    # 各日付の曜日インデックス(0:月 ~ 6:日)を取得
+    weekdays_indices = [(base_date + datetime.timedelta(days=i)).weekday() for i in range(DAYS)]
 
     staff = staff_df["name"].tolist()
     staff_type = dict(zip(staff_df["name"], staff_df["type"]))
@@ -134,7 +149,7 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
                 if can[s][sh] == 1:
                     x[s, d, sh] = model.NewBoolVar(f"x_{s}_{d}_{sh}")
                 else:
-                    x[s, d, sh] = None # スキルがない場合はNone
+                    x[s, d, sh] = None 
 
     # 1日1シフトまで
     for s in staff:
@@ -142,22 +157,23 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
             model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
 
     # ==========================================
-    # 人数制約 (通常 vs 診断モード)
+    # 人数制約 (曜日別の設定値を参照)
     # ==========================================
-    shortage_vars = {} # 診断用：不足人数変数
+    shortage_vars = {} 
 
     for d in range(DAYS):
+        wd_idx = weekdays_indices[d]     # 0~6
+        wd_name = WEEKDAY_NAMES[wd_idx]  # "月"~"日"
+        
         for sh in SHIFT_TYPES:
             active_staff = sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None)
-            req_num = required_counts[sh]
+            
+            # DataFrameからその曜日・そのシフトの必要人数を取得
+            req_num = int(req_df.at[sh, wd_name])
 
             if not is_diagnostic:
-                # 通常モード：厳密に人数を守る
                 model.Add(active_staff == req_num)
             else:
-                # 診断モード：不足を許容し、その不足数をカウントする
-                # active_staff + shortage == req_num
-                # つまり、足りない分だけ shortage が増える
                 shortage = model.NewIntVar(0, req_num, f"shortage_{d}_{sh}")
                 shortage_vars[d, sh] = shortage
                 model.Add(active_staff + shortage == req_num)
@@ -173,7 +189,7 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
                 is_after_night = x[s, d-1, "夜"] if x[s, d-1, "夜"] is not None else 0
             model.Add(work_flag[s, d] == is_shifted + is_after_night)
 
-    # 希望反映 (ここは緩和しない)
+    # 希望反映
     for s in staff:
         for d in range(DAYS):
             inp = req_input[s][d]
@@ -188,7 +204,6 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
                         if other_sh != inp and x[s, d, other_sh] is not None:
                             model.Add(x[s, d, other_sh] == 0)
                 else:
-                    # スキルがないのに希望を入れている場合の対策（本来はエラーだが、ここでは0固定で矛盾させる）
                     model.Add(work_flag[s, d] == 0) 
 
     # 夜勤ルール
@@ -196,10 +211,8 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
     for s in staff:
         for d in range(DAYS):
             if x[s, d, "夜"] is not None:
-                # 明けは絶対休み
                 if d + 1 < DAYS:
                     model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
-                # 翌々日は可能な限り休み (ペナルティ)
                 if d + 2 < DAYS:
                     violation = model.NewBoolVar(f"violation_{s}_{d}")
                     model.AddBoolAnd([x[s, d, "夜"], work_flag[s, d+2]]).OnlyEnforceIf(violation)
@@ -226,7 +239,7 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
     # 曜日制限
     for s in staff:
         for d in range(DAYS):
-            if weekday_can[s][weekdays[d]] == 0:
+            if weekday_can[s][weekdays_indices[d]] == 0:
                 model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
 
     # 公休数
@@ -244,13 +257,11 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
         night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
         model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
     
-    # 評価項目
-    night_penalty = []     # 夜勤不可なのに夜勤 (基本起きないが念のため)
-    dispatch_penalty = []  # 派遣のコスト
-    night_maximization_bonus = [] # 夜勤専従ボーナス
-    balance_penalty = []   # 夜勤回数の平準化
+    night_penalty = []
+    dispatch_penalty = []
+    night_maximization_bonus = []
+    balance_penalty = []
 
-    # 平準化対象
     target_workers = [s for s in staff if can[s]["夜"] == 1 and night_only.get(s, 0) == 0]
     if target_workers:
         max_night = model.NewIntVar(0, DAYS, "max_night")
@@ -276,7 +287,6 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
         night_maximization_bonus.append(night_count[s])
 
     if not is_diagnostic:
-        # 通常の目的関数
         model.Minimize(
             10 * sum(night_penalty) +
             100 * sum(dispatch_penalty) +
@@ -285,7 +295,6 @@ def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=Fal
             - 1000 * sum(night_maximization_bonus)
         )
     else:
-        # 診断モードの目的関数：不足人数を最小化することだけを考える
         total_shortage_val = sum(shortage_vars.values())
         model.Minimize(total_shortage_val)
 
@@ -303,15 +312,13 @@ if st.button("シフトを作成する", type="primary"):
         DAYS = calendar.monthrange(int(YEAR), int(MONTH))[1]
         st.info(f"{YEAR}年{MONTH}月 ({DAYS}日分) のシフトを計算中...")
 
-        # ユーザー設定の必要人数
-        REQUIRED = {"早": req_early, "日": req_day, "遅": req_late, "夜": req_night}
         SHIFT_TYPES = ["早", "日", "遅", "夜"]
 
         # Excel読み込み
         staff_df = pd.read_excel(uploaded_file, sheet_name="staff")
         
         # --- 1回目: 通常計算 ---
-        model, x, _, req_input, prev_night, staff = create_shift_model(staff_df, YEAR, MONTH, REQUIRED, is_diagnostic=False)
+        model, x, _, req_input, prev_night, staff = create_shift_model(staff_df, YEAR, MONTH, edited_req_df, is_diagnostic=False)
         
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = 30.0 
@@ -346,7 +353,6 @@ if st.button("シフトを作成する", type="primary"):
                                 break
                         
                         if not is_work:
-                            # 明け判定
                             prev_is_night = False
                             if d > 0:
                                 if x[s, d-1, "夜"] is not None and solver.Value(x[s, d-1, "夜"]) == 1:
@@ -413,12 +419,11 @@ if st.button("シフトを作成する", type="primary"):
             )
         
         else:
-            # --- 2回目: 診断モード (解が見つからなかった場合) ---
+            # --- 2回目: 診断モード ---
             st.error("❌ 条件を満たすシフトが見つかりませんでした。")
             st.warning("🕵️‍♂️ 原因を調査しています...（不足している人員箇所を計算中）")
 
-            # 診断用モデルを作成（人数制約を緩和）
-            diag_model, diag_x, shortage_vars, _, _, _ = create_shift_model(staff_df, YEAR, MONTH, REQUIRED, is_diagnostic=True)
+            diag_model, diag_x, shortage_vars, _, _, _ = create_shift_model(staff_df, YEAR, MONTH, edited_req_df, is_diagnostic=True)
             
             diag_solver = cp_model.CpSolver()
             diag_status = diag_solver.Solve(diag_model)
@@ -426,37 +431,38 @@ if st.button("シフトを作成する", type="primary"):
             if diag_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                 st.markdown("### ⚠️ 人員不足レポート")
                 st.markdown("以下の日付・シフトで、スタッフの数が足りていません。")
-                st.markdown("（希望休が重なっているか、そのシフトに入れるスタッフ自体が公休等で不足しています）")
 
                 error_rows = []
-                weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+                WEEKDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
                 
                 base_date = datetime.date(int(YEAR), int(MONTH), 1)
 
                 for d in range(DAYS):
                     date_obj = base_date + datetime.timedelta(days=d)
-                    wd_str = weekdays_jp[date_obj.weekday()]
+                    wd_idx = date_obj.weekday()
+                    wd_str = WEEKDAY_NAMES[wd_idx]
 
                     for sh in SHIFT_TYPES:
                         lack = diag_solver.Value(shortage_vars[d, sh])
                         if lack > 0:
-                            req_val = REQUIRED[sh]
+                            # その曜日の必要人数を取得
+                            req_val = int(edited_req_df.at[sh, wd_str])
                             actual_val = req_val - lack
                             error_rows.append({
                                 "日付": f"{d+1}日 ({wd_str})",
                                 "シフト": sh,
-                                "必要数": req_val,
+                                "必要設定数": req_val,
                                 "確保可能数": actual_val,
                                 "不足数": f"MINUS {lack}"
                             })
                 
                 if error_rows:
                     st.table(pd.DataFrame(error_rows).set_index("日付"))
-                    st.info("💡 **対策**: 該当日の必要人数を減らすか、スタッフの希望休・公休設定を見直してください。")
+                    st.info("💡 **対策**: 該当日の設定人数を減らすか、スタッフの休み設定を見直してください。")
                 else:
-                    st.write("人員数以外の複雑な制約（連勤や夜勤間隔など）で矛盾が生じている可能性があります。")
+                    st.write("人員数以外の複雑な制約で矛盾が生じている可能性があります。")
             else:
-                st.error("人員数を無視してもシフトが組めません。Excelの入力ミス（全員が希望休など）がないか確認してください。")
+                st.error("人員数を無視してもシフトが組めません。Excelの入力ミスがないか確認してください。")
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
