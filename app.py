@@ -46,7 +46,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.5)")
+st.title("📅 シフト自動作成ツール (Ver.6)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -70,8 +70,226 @@ with st.sidebar:
     uploaded_file = st.file_uploader("staff.xlsx をアップロード", type=["xlsx"])
     
     st.markdown("---")
+    st.write("👥 **各シフトの必要人数**")
+    req_early = st.number_input("早番 (早)", value=1, min_value=0)
+    req_day   = st.number_input("日勤 (日)", value=1, min_value=0)
+    req_late  = st.number_input("遅番 (遅)", value=1, min_value=0)
+    req_night = st.number_input("夜勤 (夜)", value=2, min_value=0)
+
+    st.markdown("---")
     st.write("🔧 **詳細設定**")
     random_seed = st.number_input("再計算用乱数 (結果を変えたい時は数字を変更)", value=0, step=1)
+
+# =====================
+# ヘルパー関数: モデル作成
+# =====================
+def create_shift_model(staff_df, year, month, required_counts, is_diagnostic=False):
+    """
+    モデルを作成する関数
+    is_diagnostic=True の場合、人数不足を許容して「不足数」を最小化するモデルを作成する
+    """
+    DAYS = calendar.monthrange(int(year), int(month))[1]
+    SHIFT_TYPES = ["早", "日", "遅", "夜"]
+    
+    base_date = datetime.date(int(year), int(month), 1)
+    weekdays = [(base_date + datetime.timedelta(days=i)).weekday() for i in range(DAYS)]
+
+    staff = staff_df["name"].tolist()
+    staff_type = dict(zip(staff_df["name"], staff_df["type"]))
+    off_days = dict(zip(staff_df["name"], staff_df["off_days"]))
+
+    # 希望入力の整理
+    req_input = {s: {} for s in staff}
+    for _, r in staff_df.iterrows():
+        s = r["name"]
+        for d in range(DAYS):
+            val = r.get(f"req_shift_{d+1}", None)
+            if pd.isna(val) or val == "" or val == 0:
+                req_input[s][d] = None
+            else:
+                req_input[s][d] = str(val).strip()
+
+    prev_night = dict(zip(staff_df["name"], staff_df["prev_night"] if "prev_night" in staff_df.columns else [0]*len(staff)))
+    prev_consecutive = dict(zip(staff_df["name"], staff_df["prev_consecutive"] if "prev_consecutive" in staff_df.columns else [0]*len(staff)))
+    night_only = dict(zip(staff_df["name"], staff_df["night_only"] if "night_only" in staff_df.columns else [0]*len(staff)))
+
+    can = {}
+    weekday_can = {}
+    for _, r in staff_df.iterrows():
+        s = r["name"]
+        can[s] = {"早": r["can_early"], "日": r["can_day"], "遅": r["can_late"], "夜": r["can_night"]}
+        weekday_can[s] = {0: r["mon"], 1: r["tue"], 2: r["wed"], 3: r["thu"], 4: r["fri"], 5: r["sat"], 6: r["sun"]}
+
+    limit_consecutive = dict(zip(staff_df["name"], staff_df["limit_consecutive"] if "limit_consecutive" in staff_df.columns else [6]*len(staff)))
+
+    # --- モデル構築開始 ---
+    model = cp_model.CpModel()
+    x = {}
+    work_flag = {}
+
+    # 変数定義
+    for s in staff:
+        for d in range(DAYS):
+            for sh in SHIFT_TYPES:
+                if can[s][sh] == 1:
+                    x[s, d, sh] = model.NewBoolVar(f"x_{s}_{d}_{sh}")
+                else:
+                    x[s, d, sh] = None # スキルがない場合はNone
+
+    # 1日1シフトまで
+    for s in staff:
+        for d in range(DAYS):
+            model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
+
+    # ==========================================
+    # 人数制約 (通常 vs 診断モード)
+    # ==========================================
+    shortage_vars = {} # 診断用：不足人数変数
+
+    for d in range(DAYS):
+        for sh in SHIFT_TYPES:
+            active_staff = sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None)
+            req_num = required_counts[sh]
+
+            if not is_diagnostic:
+                # 通常モード：厳密に人数を守る
+                model.Add(active_staff == req_num)
+            else:
+                # 診断モード：不足を許容し、その不足数をカウントする
+                # active_staff + shortage == req_num
+                # つまり、足りない分だけ shortage が増える
+                shortage = model.NewIntVar(0, req_num, f"shortage_{d}_{sh}")
+                shortage_vars[d, sh] = shortage
+                model.Add(active_staff + shortage == req_num)
+
+    # 勤務フラグ作成
+    for s in staff:
+        for d in range(DAYS):
+            work_flag[s, d] = model.NewBoolVar(f"work_{s}_{d}")
+            is_shifted = sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None)
+            if d == 0:
+                is_after_night = prev_night[s]
+            else:
+                is_after_night = x[s, d-1, "夜"] if x[s, d-1, "夜"] is not None else 0
+            model.Add(work_flag[s, d] == is_shifted + is_after_night)
+
+    # 希望反映 (ここは緩和しない)
+    for s in staff:
+        for d in range(DAYS):
+            inp = req_input[s][d]
+            if inp is None: continue
+            if inp == "休" or inp == "有":
+                model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
+                model.Add(work_flag[s, d] == 0)
+            elif inp in SHIFT_TYPES:
+                if x[s, d, inp] is not None:
+                    model.Add(x[s, d, inp] == 1)
+                    for other_sh in SHIFT_TYPES:
+                        if other_sh != inp and x[s, d, other_sh] is not None:
+                            model.Add(x[s, d, other_sh] == 0)
+                else:
+                    # スキルがないのに希望を入れている場合の対策（本来はエラーだが、ここでは0固定で矛盾させる）
+                    model.Add(work_flag[s, d] == 0) 
+
+    # 夜勤ルール
+    next_day_off_penalty = [] 
+    for s in staff:
+        for d in range(DAYS):
+            if x[s, d, "夜"] is not None:
+                # 明けは絶対休み
+                if d + 1 < DAYS:
+                    model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
+                # 翌々日は可能な限り休み (ペナルティ)
+                if d + 2 < DAYS:
+                    violation = model.NewBoolVar(f"violation_{s}_{d}")
+                    model.AddBoolAnd([x[s, d, "夜"], work_flag[s, d+2]]).OnlyEnforceIf(violation)
+                    model.AddBoolOr([x[s, d, "夜"].Not(), work_flag[s, d+2].Not()]).OnlyEnforceIf(violation.Not())
+                    next_day_off_penalty.append(violation)
+
+    # 連勤制限
+    for s in staff:
+        limit = int(limit_consecutive[s]) if pd.notna(limit_consecutive[s]) else 6
+        ng_days = limit + 1
+        for d in range(DAYS - limit):
+            window = [work_flag[s, d + k] for k in range(ng_days)]
+            model.AddBoolOr([w.Not() for w in window])
+        
+        p_cons = prev_consecutive[s]
+        if p_cons > 0:
+            check_len = limit - p_cons + 1
+            if check_len <= 0:
+                model.Add(work_flag[s, 0] == 0)
+            elif check_len <= DAYS:
+                window = [work_flag[s, k] for k in range(check_len)]
+                model.AddBoolOr([w.Not() for w in window])
+
+    # 曜日制限
+    for s in staff:
+        for d in range(DAYS):
+            if weekday_can[s][weekdays[d]] == 0:
+                model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
+
+    # 公休数
+    for s in staff:
+        total_work = sum(work_flag[s, d] for d in range(DAYS))
+        paid_leave = sum(1 for d in range(DAYS) if req_input[s][d] == "有")
+        if staff_type[s] == "常勤":
+            model.Add(total_work == DAYS - off_days[s] - paid_leave)
+        else:
+            model.Add(total_work <= DAYS - off_days[s] - paid_leave)
+
+    # 目的関数
+    night_count = {}
+    for s in staff:
+        night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
+        model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
+    
+    # 評価項目
+    night_penalty = []     # 夜勤不可なのに夜勤 (基本起きないが念のため)
+    dispatch_penalty = []  # 派遣のコスト
+    night_maximization_bonus = [] # 夜勤専従ボーナス
+    balance_penalty = []   # 夜勤回数の平準化
+
+    # 平準化対象
+    target_workers = [s for s in staff if can[s]["夜"] == 1 and night_only.get(s, 0) == 0]
+    if target_workers:
+        max_night = model.NewIntVar(0, DAYS, "max_night")
+        min_night = model.NewIntVar(0, DAYS, "min_night")
+        for s in target_workers:
+            model.Add(night_count[s] <= max_night)
+            model.Add(night_count[s] >= min_night)
+        diff = model.NewIntVar(0, DAYS, "night_diff")
+        model.Add(diff == max_night - min_night)
+        balance_penalty.append(diff)
+
+    for s in staff:
+        for d in range(DAYS):
+            if x[s, d, "夜"] is not None and night_only.get(s, 0) == 0:
+                night_penalty.append(x[s, d, "夜"])
+            if staff_type[s] == "派遣":
+                for sh in SHIFT_TYPES:
+                    if x[s, d, sh] is not None:
+                        dispatch_penalty.append(x[s, d, sh])
+    
+    night_only_staff = [s for s in staff if night_only.get(s, 0) == 1]
+    for s in night_only_staff:
+        night_maximization_bonus.append(night_count[s])
+
+    if not is_diagnostic:
+        # 通常の目的関数
+        model.Minimize(
+            10 * sum(night_penalty) +
+            100 * sum(dispatch_penalty) +
+            100 * sum(balance_penalty) +
+            500 * sum(next_day_off_penalty)
+            - 1000 * sum(night_maximization_bonus)
+        )
+    else:
+        # 診断モードの目的関数：不足人数を最小化することだけを考える
+        total_shortage_val = sum(shortage_vars.values())
+        model.Minimize(total_shortage_val)
+
+    return model, x, shortage_vars, req_input, prev_night, staff
 
 # =====================
 # メイン処理
@@ -82,184 +300,19 @@ if st.button("シフトを作成する", type="primary"):
         st.stop()
 
     try:
-        # 基本設定
         DAYS = calendar.monthrange(int(YEAR), int(MONTH))[1]
         st.info(f"{YEAR}年{MONTH}月 ({DAYS}日分) のシフトを計算中...")
 
+        # ユーザー設定の必要人数
+        REQUIRED = {"早": req_early, "日": req_day, "遅": req_late, "夜": req_night}
         SHIFT_TYPES = ["早", "日", "遅", "夜"]
-        REQUIRED = {"早": 1, "日": 1, "遅": 1, "夜": 2}
-
-        base_date = datetime.date(int(YEAR), int(MONTH), 1)
-        weekdays = [(base_date + datetime.timedelta(days=i)).weekday() for i in range(DAYS)]
 
         # Excel読み込み
         staff_df = pd.read_excel(uploaded_file, sheet_name="staff")
-        staff = staff_df["name"].tolist()
-
-        staff_type = dict(zip(staff_df["name"], staff_df["type"]))
-        off_days = dict(zip(staff_df["name"], staff_df["off_days"]))
-
-        # 希望入力
-        req_input = {s: {} for s in staff}
-        for _, r in staff_df.iterrows():
-            s = r["name"]
-            for d in range(DAYS):
-                val = r.get(f"req_shift_{d+1}", None)
-                if pd.isna(val) or val == "" or val == 0:
-                    req_input[s][d] = None
-                else:
-                    req_input[s][d] = str(val).strip()
-
-        prev_night = dict(zip(staff_df["name"], staff_df["prev_night"] if "prev_night" in staff_df.columns else [0]*len(staff)))
-        prev_consecutive = dict(zip(staff_df["name"], staff_df["prev_consecutive"] if "prev_consecutive" in staff_df.columns else [0]*len(staff)))
-        night_only = dict(zip(staff_df["name"], staff_df["night_only"] if "night_only" in staff_df.columns else [0]*len(staff)))
-
-        can = {}
-        weekday_can = {}
-        for _, r in staff_df.iterrows():
-            s = r["name"]
-            can[s] = {"早": r["can_early"], "日": r["can_day"], "遅": r["can_late"], "夜": r["can_night"]}
-            weekday_can[s] = {0: r["mon"], 1: r["tue"], 2: r["wed"], 3: r["thu"], 4: r["fri"], 5: r["sat"], 6: r["sun"]}
-
-        limit_consecutive = dict(zip(staff_df["name"], staff_df["limit_consecutive"] if "limit_consecutive" in staff_df.columns else [6]*len(staff)))
-
-        # モデル作成
-        model = cp_model.CpModel()
-        x = {}
-        work_flag = {}
-
-        for s in staff:
-            for d in range(DAYS):
-                for sh in SHIFT_TYPES:
-                    x[s, d, sh] = model.NewBoolVar(f"x_{s}_{d}_{sh}") if can[s][sh] == 1 else None
-
-        # 1日1シフト
-        for s in staff:
-            for d in range(DAYS):
-                model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
-
-        # 必要人数
-        for d in range(DAYS):
-            for sh in SHIFT_TYPES:
-                model.Add(sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None) == REQUIRED[sh])
-
-        # 勤務フラグ作成
-        for s in staff:
-            for d in range(DAYS):
-                work_flag[s, d] = model.NewBoolVar(f"work_{s}_{d}")
-                is_shifted = sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None)
-                if d == 0:
-                    is_after_night = prev_night[s]
-                else:
-                    is_after_night = x[s, d-1, "夜"] if x[s, d-1, "夜"] is not None else 0
-                model.Add(work_flag[s, d] == is_shifted + is_after_night)
-
-        # 希望反映
-        for s in staff:
-            for d in range(DAYS):
-                inp = req_input[s][d]
-                if inp is None: continue
-                if inp == "休" or inp == "有":
-                    model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
-                    model.Add(work_flag[s, d] == 0)
-                elif inp in SHIFT_TYPES:
-                    if x[s, d, inp] is not None:
-                        model.Add(x[s, d, inp] == 1)
-                        for other_sh in SHIFT_TYPES:
-                            if other_sh != inp and x[s, d, other_sh] is not None:
-                                model.Add(x[s, d, other_sh] == 0)
-
-        # 夜勤ルール
-        next_day_off_penalty = [] 
-        for s in staff:
-            for d in range(DAYS):
-                if x[s, d, "夜"] is not None:
-                    # 明けは絶対休み
-                    if d + 1 < DAYS:
-                        model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
-                    # 翌々日は可能な限り休み
-                    if d + 2 < DAYS:
-                        violation = model.NewBoolVar(f"violation_{s}_{d}")
-                        model.AddBoolAnd([x[s, d, "夜"], work_flag[s, d+2]]).OnlyEnforceIf(violation)
-                        model.AddBoolOr([x[s, d, "夜"].Not(), work_flag[s, d+2].Not()]).OnlyEnforceIf(violation.Not())
-                        next_day_off_penalty.append(violation)
-
-        # 連勤制限
-        for s in staff:
-            limit = int(limit_consecutive[s]) if pd.notna(limit_consecutive[s]) else 6
-            ng_days = limit + 1
-            for d in range(DAYS - limit):
-                window = [work_flag[s, d + k] for k in range(ng_days)]
-                model.AddBoolOr([w.Not() for w in window])
-            
-            p_cons = prev_consecutive[s]
-            if p_cons > 0:
-                check_len = limit - p_cons + 1
-                if check_len <= 0:
-                    model.Add(work_flag[s, 0] == 0)
-                elif check_len <= DAYS:
-                    window = [work_flag[s, k] for k in range(check_len)]
-                    model.AddBoolOr([w.Not() for w in window])
-
-        # 曜日制限
-        for s in staff:
-            for d in range(DAYS):
-                if weekday_can[s][weekdays[d]] == 0:
-                    model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) == 0)
-
-        # 公休数
-        for s in staff:
-            total_work = sum(work_flag[s, d] for d in range(DAYS))
-            paid_leave = sum(1 for d in range(DAYS) if req_input[s][d] == "有")
-            if staff_type[s] == "常勤":
-                model.Add(total_work == DAYS - off_days[s] - paid_leave)
-            else:
-                model.Add(total_work <= DAYS - off_days[s] - paid_leave)
-
-        # 目的関数
-        night_count = {}
-        for s in staff:
-            night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
-            model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
         
-        target_workers = [s for s in staff if can[s]["夜"] == 1 and night_only.get(s, 0) == 0]
-        balance_penalty = []
-        if target_workers:
-            max_night = model.NewIntVar(0, DAYS, "max_night")
-            min_night = model.NewIntVar(0, DAYS, "min_night")
-            for s in target_workers:
-                model.Add(night_count[s] <= max_night)
-                model.Add(night_count[s] >= min_night)
-            diff = model.NewIntVar(0, DAYS, "night_diff")
-            model.Add(diff == max_night - min_night)
-            balance_penalty.append(diff)
-
-        night_penalty = []
-        dispatch_penalty = []
-        night_maximization_bonus = []
-        night_only_staff = [s for s in staff if night_only.get(s, 0) == 1]
-
-        for s in staff:
-            for d in range(DAYS):
-                if x[s, d, "夜"] is not None and night_only.get(s, 0) == 0:
-                    night_penalty.append(x[s, d, "夜"])
-                if staff_type[s] == "派遣":
-                    for sh in SHIFT_TYPES:
-                        if x[s, d, sh] is not None:
-                            dispatch_penalty.append(x[s, d, sh])
+        # --- 1回目: 通常計算 ---
+        model, x, _, req_input, prev_night, staff = create_shift_model(staff_df, YEAR, MONTH, REQUIRED, is_diagnostic=False)
         
-        for s in night_only_staff:
-            night_maximization_bonus.append(night_count[s])
-
-        model.Minimize(
-            10 * sum(night_penalty) +
-            100 * sum(dispatch_penalty) +
-            100 * sum(balance_penalty) +
-            500 * sum(next_day_off_penalty)
-            - 1000 * sum(night_maximization_bonus)
-        )
-
-        # Solve
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = 30.0 
         solver.parameters.random_seed = int(random_seed)
@@ -269,7 +322,7 @@ if st.button("シフトを作成する", type="primary"):
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             st.success(f"✅ 作成成功！ (Status: {solver.StatusName(status)})")
 
-            # 【修正点】「明」列を削除
+            # 結果作成処理
             count_cols = ["早", "日", "遅", "夜", "休", "有"]
             count_data = {c: [] for c in count_cols}
             result = []
@@ -304,10 +357,9 @@ if st.button("シフトを作成する", type="primary"):
                             
                             if prev_is_night:
                                 v = "明"
-                                # 明けはカウントしないので何もしない
                             else:
                                 v = "休"
-                                p_counts["休"] += 1 # 通常の休みのみカウント
+                                p_counts["休"] += 1
                     
                     row.append(v)
                 result.append(row)
@@ -359,8 +411,52 @@ if st.button("シフトを作成する", type="primary"):
                 file_name=f"shift_{YEAR}_{MONTH}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+        
         else:
-            st.error("❌ 解が見つかりませんでした。")
+            # --- 2回目: 診断モード (解が見つからなかった場合) ---
+            st.error("❌ 条件を満たすシフトが見つかりませんでした。")
+            st.warning("🕵️‍♂️ 原因を調査しています...（不足している人員箇所を計算中）")
+
+            # 診断用モデルを作成（人数制約を緩和）
+            diag_model, diag_x, shortage_vars, _, _, _ = create_shift_model(staff_df, YEAR, MONTH, REQUIRED, is_diagnostic=True)
+            
+            diag_solver = cp_model.CpSolver()
+            diag_status = diag_solver.Solve(diag_model)
+
+            if diag_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                st.markdown("### ⚠️ 人員不足レポート")
+                st.markdown("以下の日付・シフトで、スタッフの数が足りていません。")
+                st.markdown("（希望休が重なっているか、そのシフトに入れるスタッフ自体が公休等で不足しています）")
+
+                error_rows = []
+                weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+                
+                base_date = datetime.date(int(YEAR), int(MONTH), 1)
+
+                for d in range(DAYS):
+                    date_obj = base_date + datetime.timedelta(days=d)
+                    wd_str = weekdays_jp[date_obj.weekday()]
+
+                    for sh in SHIFT_TYPES:
+                        lack = diag_solver.Value(shortage_vars[d, sh])
+                        if lack > 0:
+                            req_val = REQUIRED[sh]
+                            actual_val = req_val - lack
+                            error_rows.append({
+                                "日付": f"{d+1}日 ({wd_str})",
+                                "シフト": sh,
+                                "必要数": req_val,
+                                "確保可能数": actual_val,
+                                "不足数": f"MINUS {lack}"
+                            })
+                
+                if error_rows:
+                    st.table(pd.DataFrame(error_rows).set_index("日付"))
+                    st.info("💡 **対策**: 該当日の必要人数を減らすか、スタッフの希望休・公休設定を見直してください。")
+                else:
+                    st.write("人員数以外の複雑な制約（連勤や夜勤間隔など）で矛盾が生じている可能性があります。")
+            else:
+                st.error("人員数を無視してもシフトが組めません。Excelの入力ミス（全員が希望休など）がないか確認してください。")
 
     except Exception as e:
-        st.error(f"エラーが発生しました: {e}")
+        st.error(f"システムエラーが発生しました: {e}")
