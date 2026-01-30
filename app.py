@@ -46,7 +46,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.7 曜日別設定対応)")
+st.title("📅 シフト自動作成ツール (Ver.7)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -466,3 +466,4 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
