@@ -292,18 +292,26 @@ if st.button("シフトを作成する", type="primary"):
         solver.parameters.random_seed = int(random_seed)
         status = solver.Solve(model)
 
-        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+       if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             st.success("✅ シフト作成に成功しました！")
             
             # 結果集計
             DAYS = calendar.monthrange(int(YEAR), int(MONTH))[1]
             SHIFT_TYPES = ["早", "日", "遅", "夜"]
             res_rows = []
+            
             for s in staff:
                 row = []
+                # ① カウント用変数の初期化
+                c_night = 0  # 夜勤回数
+                c_work = 0   # 勤務日数
+                c_off = 0    # 休み（休＋明）
+                c_paid = 0   # 有給
+                
                 for d in range(DAYS):
                     v = "休"
-                    if req_input[s][d] == "有": v = "有"
+                    if req_input[s][d] == "有": 
+                        v = "有"
                     else:
                         for sh in SHIFT_TYPES:
                             if x[s, d, sh] is not None and solver.Value(x[s, d, sh]) == 1:
@@ -311,16 +319,43 @@ if st.button("シフトを作成する", type="primary"):
                         if v == "休":
                             if (d == 0 and prev_night[s] == 1) or (d > 0 and x[s, d-1, "夜"] is not None and solver.Value(x[s, d-1, "夜"]) == 1):
                                 v = "明"
+                    
                     row.append(v)
+                    
+                    # ② カウント加算処理
+                    if v == "夜": c_night += 1
+                    if v in ["早", "日", "遅", "夜"]: c_work += 1
+                    if v in ["休", "明"]: c_off += 1
+                    if v == "有": c_paid += 1
+                
+                # ループの最後で集計列を右端に追加
+                row.extend([c_night, c_work, c_off, c_paid])
                 res_rows.append(row)
             
-            df_out = pd.DataFrame(res_rows, index=staff, columns=[f"{i+1}日" for i in range(DAYS)])
+            # データフレーム作成（集計用ヘッダー追加）
+            date_cols = [f"{i+1}日" for i in range(DAYS)]
+            count_cols = ["夜勤", "勤務日", "休み", "有給"]
+            df_out = pd.DataFrame(res_rows, index=staff, columns=date_cols + count_cols)
+            
             st.dataframe(df_out)
 
-            # Excelダウンロード
+            # Excelダウンロードとスタイル適用
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_out.to_excel(writer, sheet_name='シフト結果')
+                
+                # ③ 「明」と「休」のセルを薄緑に着色
+                wb = writer.book
+                ws = writer.sheets['シフト結果']
+                fill_green = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+                
+                # シフト部分のみループ（集計列は着色しないため max_col を調整）
+                # 1行目はヘッダー、A列は氏名なので、データは2行目・2列目(B列)から開始
+                for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=2, max_col=DAYS+1):
+                    for cell in row:
+                        if cell.value in ["明", "休"]:
+                            cell.fill = fill_green
+
             st.download_button("📥 Excelを保存", output.getvalue(), f"shift_{YEAR}_{MONTH}.xlsx")
 
         else:
@@ -350,3 +385,4 @@ if st.button("シフトを作成する", type="primary"):
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
         st.info("Excelのカラム名がマニュアル通り（氏名、雇用形態...）になっているか確認してください。")
+
