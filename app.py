@@ -23,11 +23,11 @@ MANUAL_TEXT = """
 | **name** | スタッフの名前 |
 | **type** | `常勤` または `派遣` (常勤は各日1名の確保が優先されます) |
 | **off_days** | 月に必要な公休（休み）の日数 |
+| **max_night** | **(新)** 夜勤の最大回数（空欄=制限なし） |
 | **can_〇〇** | `1`=可, `0`=不可 (early=早, day=日, late=遅, night=夜) |
 | **mon**～**sun** | 曜日ごとの可否 (`1`=可, `0`=不可) |
 | **night_only** | `1`=夜勤専従 (優先的に夜勤を割当) |
 | **limit_consecutive** | 最大連勤数 (空欄=6連勤まで) |
-| **max_night** | 【新】月間の夜勤回数上限 (空欄=制限なし) |
 | **prev_night** | 前月末が夜勤なら`1` (1日が休みになります) |
 | **prev_consecutive** | 前月末時点の連勤数 |
 
@@ -53,7 +53,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.9)")
+st.title("📅 シフト自動作成ツール (Ver.8)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -104,13 +104,10 @@ with st.sidebar:
 # =====================
 def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=False):
     """
-    モデルを作成する関数
-    req_df: 曜日ごとの必要人数が入ったDataFrame
-    ng_pairs: 禁止ペアのリスト [(Aさん, Bさん), ...]
+    モデルを作成する関数 (修正版)
     """
     DAYS = calendar.monthrange(int(year), int(month))[1]
     SHIFT_TYPES = ["早", "日", "遅", "夜"]
-    # 日勤帯として扱うシフト（常勤確保、NGペア判定用）
     DAY_SHIFT_GROUP = ["早", "日", "遅"] 
     WEEKDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
     
@@ -145,14 +142,8 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
 
     limit_consecutive = dict(zip(staff_df["name"], staff_df["limit_consecutive"] if "limit_consecutive" in staff_df.columns else [6]*len(staff)))
 
-    # 【追加】③ 夜勤回数上限の読み込み (列がない/空欄の場合は31回=制限なしとする)
-    max_night_limit = {}
-    if "max_night" in staff_df.columns:
-        for _, r in staff_df.iterrows():
-            val = r["max_night"]
-            max_night_limit[r["name"]] = int(val) if pd.notna(val) else 31
-    else:
-        max_night_limit = {s: 31 for s in staff}
+    # 【修正②】夜勤回数上限の読み込み (列がない場合は制限なし=31回とする)
+    max_night_limit = dict(zip(staff_df["name"], staff_df["max_night"] if "max_night" in staff_df.columns else [31]*len(staff)))
 
     # --- モデル構築開始 ---
     model = cp_model.CpModel()
@@ -173,19 +164,14 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         for d in range(DAYS):
             model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
 
-    # ==========================================
-    # 人数制約 (曜日別の設定値を参照)
-    # ==========================================
+    # 人数制約
     shortage_vars = {} 
-
     for d in range(DAYS):
-        wd_idx = weekdays_indices[d]     # 0~6
-        wd_name = WEEKDAY_NAMES[wd_idx]  # "月"~"日"
+        wd_idx = weekdays_indices[d]
+        wd_name = WEEKDAY_NAMES[wd_idx]
         
         for sh in SHIFT_TYPES:
             active_staff = sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None)
-            
-            # DataFrameからその曜日・そのシフトの必要人数を取得
             req_num = int(req_df.at[sh, wd_name])
 
             if not is_diagnostic:
@@ -223,51 +209,41 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                 else:
                     model.Add(work_flag[s, d] == 0) 
 
-    # -------------------------------------------------------
-    # 【改修】シフト並びの制約 (①夜明早NG / ②夜勤ルール)
-    # -------------------------------------------------------
-    consecutive_night_penalty = [] # 夜勤2連回(夜-明-夜)へのペナルティ
-    next_day_off_penalty = []      # 夜勤明け翌日の勤務へのペナルティ(夜-明-休 を推奨)
-
+    # 夜勤ルール
+    next_day_off_penalty = [] 
     for s in staff:
         for d in range(DAYS):
-            
-            # ①【修正】夜勤明け(明)の翌日に早番禁止 (夜 -> 明 -> 早 NG)
-            #   d=夜, d+1=明, d+2=早 となるパターンを禁止
-            if d + 2 < DAYS:
-                if x[s, d, "夜"] is not None and x[s, d+2, "早"] is not None:
-                    model.AddBoolOr([x[s, d, "夜"].Not(), x[s, d+2, "早"].Not()])
-
-            # ② 夜勤ルール
             if x[s, d, "夜"] is not None:
-                # A. 夜勤の翌日はシフト入力禁止（＝「明」確定）
+                # 夜勤の翌日は休み
                 if d + 1 < DAYS:
                     model.Add(sum(x[s, d+1, sh] for sh in SHIFT_TYPES if x[s, d+1, sh] is not None) == 0).OnlyEnforceIf(x[s, d, "夜"])
-
-                # B. 夜勤明けの翌日(d+2)のチェック
+                
+                # 夜勤翌々日(d+2)の制約
                 if d + 2 < DAYS:
-                    # --- 推奨1: 夜勤明けの翌日は「休み」が望ましい ---
-                    # d+2が「仕事(work_flag=1)」の場合、violationフラグを立てる
+                    # 連休確保推奨（既存）
                     violation = model.NewBoolVar(f"violation_{s}_{d}")
                     model.AddBoolAnd([x[s, d, "夜"], work_flag[s, d+2]]).OnlyEnforceIf(violation)
                     model.AddBoolOr([x[s, d, "夜"].Not(), work_flag[s, d+2].Not()]).OnlyEnforceIf(violation.Not())
                     next_day_off_penalty.append(violation)
 
-                    # --- 推奨2: 夜勤明けの翌日が「夜勤(2連勤)」はさらに避けたい ---
-                    if x[s, d+2, "夜"] is not None:
-                        is_2_nights = model.NewBoolVar(f"2nights_{s}_{d}")
-                        model.AddBoolAnd([x[s, d, "夜"], x[s, d+2, "夜"]]).OnlyEnforceIf(is_2_nights)
-                        model.AddBoolOr([x[s, d, "夜"].Not(), x[s, d+2, "夜"].Not()]).OnlyEnforceIf(is_2_nights.Not())
-                        consecutive_night_penalty.append(is_2_nights)
+                    # 【修正①】夜明の翌日(d+2)に「早番」禁止
+                    if x[s, d+2, "早"] is not None:
+                        model.Add(x[s, d+2, "早"] == 0).OnlyEnforceIf(x[s, d, "夜"])
 
-                # C. 夜勤3連勤 (夜-明-夜-明-夜) は絶対禁止
-                if d + 4 < DAYS:
-                    if x[s, d+2, "夜"] is not None and x[s, d+4, "夜"] is not None:
-                        model.AddBoolOr([
-                            x[s, d, "夜"].Not(), 
-                            x[s, d+2, "夜"].Not(), 
-                            x[s, d+4, "夜"].Not()
-                        ])
+    # 【修正④】3連休禁止（希望休が含まれる場合を除く）
+    for s in staff:
+        for d in range(DAYS - 2):
+            # d, d+1, d+2 の3日間についてチェック
+            is_requested_off = False
+            for k in range(3):
+                req_val = req_input[s][d+k]
+                if req_val == "休" or req_val == "有":
+                    is_requested_off = True
+                    break
+            
+            # 3日間に希望休が1つもなければ、3連続休み(work_flag=0)を禁止
+            if not is_requested_off:
+                model.AddBoolOr([work_flag[s, d], work_flag[s, d+1], work_flag[s, d+2]])
 
     # 連勤制限
     for s in staff:
@@ -301,39 +277,27 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         else:
             model.Add(total_work <= DAYS - off_days[s] - paid_leave)
 
-    # ==========================================
-    # 追加機能1: 常勤スタッフ確保 (早・日・遅に最低1名)
-    # ==========================================
+    # 常勤スタッフ確保
     full_time_staff = [s for s in staff if staff_type.get(s, "") == "常勤"]
     no_leader_penalty = []
-
     if full_time_staff:
         for d in range(DAYS):
-            # その日の日勤帯(早日遅)に入っている常勤スタッフの数
-            # x変数がNone(シフト不可)でない場合のみ合計する
             ft_count_vars = []
             for s in full_time_staff:
                 for sh in DAY_SHIFT_GROUP:
                     if x[s, d, sh] is not None:
                         ft_count_vars.append(x[s, d, sh])
-            
             if ft_count_vars:
-                # 常勤が0人になったらフラグを立てる
                 is_no_leader = model.NewBoolVar(f"no_leader_{d}")
                 model.Add(sum(ft_count_vars) == 0).OnlyEnforceIf(is_no_leader)
                 model.Add(sum(ft_count_vars) >= 1).OnlyEnforceIf(is_no_leader.Not())
                 no_leader_penalty.append(is_no_leader)
 
-    # ==========================================
-    # 追加機能2: NGペア制約 (日勤帯のかぶり禁止)
-    # ==========================================
+    # NGペア制約
     ng_pair_penalty = []
-    
     for (p1, p2) in ng_pairs:
-        # 両方のスタッフが存在する場合のみチェック
         if p1 in staff and p2 in staff:
             for d in range(DAYS):
-                # p1が日勤帯(早日遅)にいるか
                 p1_vars = [x[p1, d, sh] for sh in DAY_SHIFT_GROUP if x[p1, d, sh] is not None]
                 p1_is_day = model.NewBoolVar(f"ng_{p1}_{d}")
                 if p1_vars:
@@ -342,7 +306,6 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                 else:
                     model.Add(p1_is_day == 0)
 
-                # p2が日勤帯(早日遅)にいるか
                 p2_vars = [x[p2, d, sh] for sh in DAY_SHIFT_GROUP if x[p2, d, sh] is not None]
                 p2_is_day = model.NewBoolVar(f"ng_{p2}_{d}")
                 if p2_vars:
@@ -351,11 +314,9 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                 else:
                     model.Add(p2_is_day == 0)
 
-                # 両方日勤帯ならNG
                 is_ng_clash = model.NewBoolVar(f"ng_clash_{p1}_{p2}_{d}")
                 model.AddBoolAnd([p1_is_day, p2_is_day]).OnlyEnforceIf(is_ng_clash)
                 model.AddBoolOr([p1_is_day.Not(), p2_is_day.Not()]).OnlyEnforceIf(is_ng_clash.Not())
-                
                 ng_pair_penalty.append(is_ng_clash)
 
     # ==========================================
@@ -365,11 +326,12 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
     for s in staff:
         night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
         model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
-
-    # 【追加】③ 個人ごとの夜勤回数上限 (※定義順序修正済み)
-    for s in staff:
-        if max_night_limit[s] < 31: # 設定がある場合のみ
-            model.Add(night_count[s] <= max_night_limit[s])
+        
+        # 【修正②】夜勤回数上限の適用
+        limit_val = max_night_limit.get(s, 31)
+        if pd.isna(limit_val) or limit_val == "":
+            limit_val = 31
+        model.Add(night_count[s] <= int(limit_val))
     
     night_penalty = []
     dispatch_penalty = []
@@ -401,15 +363,12 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         night_maximization_bonus.append(night_count[s])
 
     if not is_diagnostic:
-        # 重みづけ設定
+        # 【修正③】balance_penalty (夜勤平準化) の重みを100→500に強化
         model.Minimize(
             10 * sum(night_penalty) +
             100 * sum(dispatch_penalty) +
-            100 * sum(balance_penalty) +
-            # 【復活・調整】夜勤明け翌日の勤務ペナルティ (推奨レベル: 軽め)
-            100 * sum(next_day_off_penalty) + 
-            # 【追加】夜勤2連勤へのペナルティ (推奨レベル: 強め)
-            400 * sum(consecutive_night_penalty) + 
+            500 * sum(balance_penalty) +
+            500 * sum(next_day_off_penalty) + 
             200 * sum(no_leader_penalty) + 
             100 * sum(ng_pair_penalty)
             - 1000 * sum(night_maximization_bonus)
@@ -602,4 +561,3 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
-
