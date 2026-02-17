@@ -238,36 +238,26 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                     model.AddBoolOr([x[s, d, "夜"].Not(), work_flag[s, d+2].Not()]).OnlyEnforceIf(violation.Not())
                     next_day_off_penalty.append(violation)
 
-    # 連休抑制: 常勤の「休・休・休」は「禁止」ではなく「ペナルティ」とする
-    consecutive_off_penalty = [] # ペナルティ用リスト
-    
+    # ==========================================
+    # 【修正】連休制限: 「常勤」のみ、自動割り当ての「休」は連続2回まで
+    # ==========================================
     for s in staff:
+        # 派遣や非常勤は休みが多くてもOKなのでスキップ
         if staff_type.get(s, "") != "常勤":
             continue
 
         for d in range(DAYS - 2):
-            # 3日間のウィンドウ
-            window_indices = [d, d+1, d+2]
+            # 連続する3日間の希望内容を取得
+            check_reqs = [req_input[s][d], req_input[s][d+1], req_input[s][d+2]]
             
-            # ユーザーの「休」「有」希望が含まれている場合は無視（ペナルティなし）
-            check_reqs = [req_input[s][k] for k in window_indices]
+            # 「休(希望休)」または「有(有給)」が1つでも含まれていれば、この期間の連休制限はしない
+            # (ユーザーが意図して連休を入れた場合は許可)
             if any(r in ["休", "有"] for r in check_reqs):
                 continue
             
-            # この3日間が「すべて休み(work_flag==0)」かどうかを判定する変数
-            is_3_consecutive_off = model.NewBoolVar(f"3_off_{s}_{d}")
-            
-            # 3日間の勤務フラグの合計
-            sum_work = sum(work_flag[s, k] for k in window_indices)
-            
-            # 合計が0なら is_3_consecutive_off は 1(True) になる
-            model.Add(sum_work == 0).OnlyEnforceIf(is_3_consecutive_off)
-            
-            # 合計が1以上なら is_3_consecutive_off は 0(False) になる
-            model.Add(sum_work >= 1).OnlyEnforceIf(is_3_consecutive_off.Not())
-            
-            # ペナルティリストに追加
-            consecutive_off_penalty.append(is_3_consecutive_off)
+            # 3日間すべて work_flag=0 (勤務なし) になることを禁止
+            # これにより、勤務(1)が含まれない「休・休・休」の並びを防ぐ
+            model.Add(sum(work_flag[s, d+k] for k in range(3)) >= 1)
 
        # 曜日制限
     for s in staff:
@@ -593,4 +583,5 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
