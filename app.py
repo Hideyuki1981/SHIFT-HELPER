@@ -570,11 +570,26 @@ if st.button("シフトを作成する", type="primary"):
                     count_data[c].append(p_counts[c])
             
             df_out = pd.DataFrame(result, index=staff, columns=[f"{i+1}日" for i in range(DAYS)])
+            
+            # ==========================================
+            # 【追加】結果表の左端に「グループ」列を追加
+            # ==========================================
+            # staff_dfからグループ情報を再取得
+            if "group" in staff_df.columns:
+                group_map = dict(zip(staff_df["name"], staff_df["group"]))
+                group_list = [group_map.get(s, "") for s in staff]
+            else:
+                group_list = ["A"] * len(staff)
+
+            # 0番目(名前の次)に挿入
+            df_out.insert(0, "グループ", group_list)
+            # ==========================================
+
             for c in count_cols:
                 df_out[c] = count_data[c]
 
+            # 画面表示 (修正済み)
             def highlight_cells(val):
-                # 薄い緑 (#E2F0D9)
                 if val in ["明", "休", "有"]:
                     return "background-color: #E2F0D9; color: black"
                 return ""
@@ -598,10 +613,12 @@ if st.button("シフトを作成する", type="primary"):
             # ==========================================
             for i, s in enumerate(staff, start=2):
                 for d in range(DAYS):
-                    cell = ws.cell(row=i, column=d+2)
+                    # 名前(A) -> グループ(B) -> 1日(C)... なので、日付データは C列(3) から始まる
+                    # d=0(1日) のとき column=3
+                    cell = ws.cell(row=i, column=d+3)  # ← ここを d+2 から d+3 に変更
+                    
                     val = cell.value
                     
-                    # セルの文字が「明」「休」「有」のいずれかなら緑にする
                     if val in ["明", "休", "有"]:
                         cell.fill = green_fill
 
