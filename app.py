@@ -29,7 +29,6 @@ MANUAL_TEXT = """
 | **limit_consecutive** | 最大連勤数 (空欄=6連勤まで) |
 | **prev_night** | 前月末が夜勤なら`1` (1日が休みになります) |
 | **prev_consecutive** | 前月末時点の連勤数 |
-| **max_night** | 月の夜勤回数上限 (空欄=制限なし) |
 
 ### 3. ng_pairシート（禁止ペア）
 相性の悪いペアなどを入力します。可能な限り同日勤（早/日/遅）を避けます。
@@ -53,7 +52,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.9.1)")
+st.title("📅 シフト自動作成ツール (Ver.8)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -144,8 +143,6 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         weekday_can[s] = {0: r["mon"], 1: r["tue"], 2: r["wed"], 3: r["thu"], 4: r["fri"], 5: r["sat"], 6: r["sun"]}
 
     limit_consecutive = dict(zip(staff_df["name"], staff_df["limit_consecutive"] if "limit_consecutive" in staff_df.columns else [6]*len(staff)))
-
-    max_night_limit = dict(zip(staff_df["name"], staff_df["max_night"] if "max_night" in staff_df.columns else [None]*len(staff)))
 
     # --- モデル構築開始 ---
     model = cp_model.CpModel()
@@ -335,15 +332,8 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
     night_count = {}
     for s in staff:
         night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
-        
-        # 夜勤回数の計算式
         model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
     
-        # 【修正箇所2】 夜勤回数上限の適用
-        limit_val = max_night_limit.get(s)
-        if limit_val is not None and pd.notna(limit_val) and limit_val != "":
-            model.Add(night_count[s] <= int(limit_val))
-
     night_penalty = []
     dispatch_penalty = []
     night_maximization_bonus = []
