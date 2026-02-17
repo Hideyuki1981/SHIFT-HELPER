@@ -21,7 +21,7 @@ MANUAL_TEXT = """
 * **ファイル名**: `staff.xlsx`
 * **シート構成**: 
     1. `staff`: スタッフ設定（必須）
-    2. `ng_pair`: 禁止ペア設定（任意）
+    2. `ng_pair`: 禁止ペア設定（任意・英語のまま）
 
 ### 2. staffシートの入力内容 (日本語カラム名)
 | カラム名 | 説明 |
@@ -60,7 +60,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.9.4)")
+st.title("📅 シフト自動作成ツール (Ver.10)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -89,18 +89,25 @@ with st.sidebar:
 
     # デフォルト値の設定 (行:シフト, 列:曜日)
     default_req_data = {
-        "月": [1, 1, 1, 2],
-        "火": [1, 1, 1, 2],
-        "水": [1, 1, 1, 2],
-        "木": [1, 1, 1, 2],
-        "金": [1, 1, 1, 2],
-        "土": [1, 1, 1, 2],
-        "日": [1, 1, 1, 2]
+        "月": [1, 1, 1, 1, 1, 1, 1, 1], # 早A, 早B, 日A, 日B...
+        "火": [1, 1, 1, 1, 1, 1, 1, 1],
+        "水": [1, 1, 1, 1, 1, 1, 1, 1],
+        "木": [1, 1, 1, 1, 1, 1, 1, 1],
+        "金": [1, 1, 1, 1, 1, 1, 1, 1],
+        "土": [1, 1, 1, 1, 1, 1, 1, 1],
+        "日": [1, 1, 1, 1, 1, 1, 1, 1]
     }
-    df_req_default = pd.DataFrame(default_req_data, index=["早", "日", "遅", "夜"])
+    # 行ラベルをA/Bに分離
+    req_index = [
+        "早A", "早B", 
+        "日A", "日B", 
+        "遅A", "遅B", 
+        "夜A", "夜B"
+    ]
+    df_req_default = pd.DataFrame(default_req_data, index=req_index)
     
     # データエディタで編集可能にする
-    edited_req_df = st.data_editor(df_req_default, height=180)
+    edited_req_df = st.data_editor(df_req_default, height=300)
 
     st.markdown("---")
     st.write("🔧 **詳細設定**")
@@ -172,26 +179,65 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
             model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
 
     # ==========================================
-    # 人数制約 (曜日別の設定値を参照)
+    # 【修正】人数制約 & グループ応援ペナルティ
     # ==========================================
     shortage_vars = {} 
+    support_penalty = [] # 応援（自グループ不足）のペナルティ
+
+    # グループ情報の取得 (列がない場合は全員Aとする)
+    if "group" in staff_df.columns:
+        staff_group = dict(zip(staff_df["name"], staff_df["group"]))
+    else:
+        staff_group = {s: "A" for s in staff}
 
     for d in range(DAYS):
-        wd_idx = weekdays_indices[d]     # 0~6
-        wd_name = WEEKDAY_NAMES[wd_idx]  # "月"~"日"
+        wd_idx = weekdays_indices[d]
+        wd_name = WEEKDAY_NAMES[wd_idx]
         
         for sh in SHIFT_TYPES:
-            active_staff = sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None)
+            # 設定表から AとB それぞれの必要人数を取得
+            req_a = int(req_df.at[f"{sh}A", wd_name])
+            req_b = int(req_df.at[f"{sh}B", wd_name])
+            total_req = req_a + req_b
             
-            # DataFrameからその曜日・そのシフトの必要人数を取得
-            req_num = int(req_df.at[sh, wd_name])
+            # そのシフトに入っている全スタッフの実数
+            active_staff_vars = [x[s, d, sh] for s in staff if x[s, d, sh] is not None]
+            total_active = sum(active_staff_vars)
 
+            # ----------------------------------
+            # 1. 合計人数の確保 (絶対遵守)
+            # ----------------------------------
             if not is_diagnostic:
-                model.Add(active_staff == req_num)
+                model.Add(total_active == total_req)
             else:
-                shortage = model.NewIntVar(0, req_num, f"shortage_{d}_{sh}")
+                shortage = model.NewIntVar(0, total_req, f"shortage_{d}_{sh}")
                 shortage_vars[d, sh] = shortage
-                model.Add(active_staff + shortage == req_num)
+                model.Add(total_active + shortage == total_req)
+
+            # ----------------------------------
+            # 2. グループごとの確保状況チェック (応援発生時はペナルティ)
+            # ----------------------------------
+            if not is_diagnostic and total_req > 0:
+                # グループAの実数
+                count_a = sum(x[s, d, sh] for s in staff 
+                              if x[s, d, sh] is not None and staff_group.get(s) == "A")
+                
+                # グループBの実数
+                count_b = sum(x[s, d, sh] for s in staff 
+                              if x[s, d, sh] is not None and staff_group.get(s) == "B")
+                
+                # Aの不足分 (req_a - count_a) を計算。不足がなければ0
+                # 不足している＝Bが応援に入っている状態
+                shortage_a_var = model.NewIntVar(0, len(staff), f"short_a_{d}_{sh}")
+                model.Add(shortage_a_var >= req_a - count_a)
+                
+                # Bの不足分
+                shortage_b_var = model.NewIntVar(0, len(staff), f"short_b_{d}_{sh}")
+                model.Add(shortage_b_var >= req_b - count_b)
+                
+                # ペナルティに追加
+                support_penalty.append(shortage_a_var)
+                support_penalty.append(shortage_b_var)
 
     # 勤務フラグ作成
     for s in staff:
@@ -397,6 +443,8 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
             100 * sum(balance_penalty) +
             500 * sum(next_day_off_penalty) + 
             200 * sum(no_leader_penalty) + 
+　　　　　　50 * sum(consecutive_off_penalty) +
+            50 * sum(support_penalty)
             100 * sum(ng_pair_penalty)
             - 1000 * sum(night_maximization_bonus)
         )
@@ -625,6 +673,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
