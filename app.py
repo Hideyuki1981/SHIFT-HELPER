@@ -27,6 +27,7 @@ MANUAL_TEXT = """
 | **mon**～**sun** | 曜日ごとの可否 (`1`=可, `0`=不可) |
 | **night_only** | `1`=夜勤専従 (優先的に夜勤を割当) |
 | **limit_consecutive** | 最大連勤数 (空欄=6連勤まで) |
+| **max_night** | 【新】月間の夜勤回数上限 (空欄=制限なし) |
 | **prev_night** | 前月末が夜勤なら`1` (1日が休みになります) |
 | **prev_consecutive** | 前月末時点の連勤数 |
 
@@ -143,6 +144,15 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         weekday_can[s] = {0: r["mon"], 1: r["tue"], 2: r["wed"], 3: r["thu"], 4: r["fri"], 5: r["sat"], 6: r["sun"]}
 
     limit_consecutive = dict(zip(staff_df["name"], staff_df["limit_consecutive"] if "limit_consecutive" in staff_df.columns else [6]*len(staff)))
+
+    # 【追加】③ 夜勤回数上限の読み込み (列がない/空欄の場合は31回=制限なしとする)
+    max_night_limit = {}
+    if "max_night" in staff_df.columns:
+        for _, r in staff_df.iterrows():
+            val = r["max_night"]
+            max_night_limit[r["name"]] = int(val) if pd.notna(val) else 31
+    else:
+        max_night_limit = {s: 31 for s in staff}
 
     # --- モデル構築開始 ---
     model = cp_model.CpModel()
