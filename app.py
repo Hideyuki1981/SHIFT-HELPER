@@ -254,21 +254,7 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                 window = [work_flag[s, k] for k in range(check_len)]
                 model.AddBoolOr([w.Not() for w in window])
 
-    # 連休制限: 自動割り当ての「休」は連続2回まで (3連休禁止)
-    for s in staff:
-        for d in range(DAYS - 2):
-            # 連続する3日間の希望内容を取得
-            check_reqs = [req_input[s][d], req_input[s][d+1], req_input[s][d+2]]
-            
-            # 「休(希望休)」または「有(有給)」が1つでも含まれていれば、この期間の連休制限はしない
-            if any(r in ["休", "有"] for r in check_reqs):
-                continue
-            
-            # 3日間すべて work_flag=0 (勤務なし) になることを禁止
-            # ※「明」は work_flag=1 なので、[明, 休, 休] の合計は 1 となり許可されます
-            model.Add(sum(work_flag[s, d+k] for k in range(3)) >= 1)
-
-    # 曜日制限
+       # 曜日制限
     for s in staff:
         for d in range(DAYS):
             if weekday_can[s][weekdays_indices[d]] == 0:
