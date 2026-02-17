@@ -53,7 +53,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.9)")
+st.title("📅 シフト自動作成ツール (Ver.8)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -268,13 +268,7 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                             x[s, d+4, "夜"].Not()
                         ])
 
-    # -------------------------------------------------------
-    # 【追加】③ 個人ごとの夜勤回数上限
-    # -------------------------------------------------------
-    for s in staff:
-        if max_night_limit[s] < 31: # 設定がある場合のみ
-            model.Add(night_count[s] <= max_night_limit[s])
-
+  
     # 連勤制限
     for s in staff:
         limit = int(limit_consecutive[s]) if pd.notna(limit_consecutive[s]) else 6
@@ -372,6 +366,11 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
         model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
     
+　　# 【追加】③ 個人ごとの夜勤回数上限
+    for s in staff:
+        if max_night_limit[s] < 31: # 設定がある場合のみ
+            model.Add(night_count[s] <= max_night_limit[s])
+
     night_penalty = []
     dispatch_penalty = []
     night_maximization_bonus = []
@@ -607,4 +606,3 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
-
