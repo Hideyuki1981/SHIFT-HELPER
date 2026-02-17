@@ -52,7 +52,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.9.1)")
+st.title("📅 シフト自動作成ツール (Ver.9)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -489,7 +489,13 @@ if st.button("シフトを作成する", type="primary"):
             for c in count_cols:
                 df_out[c] = count_data[c]
 
-            st.dataframe(df_out)
+            def highlight_cells(val):
+                # 薄い緑 (#E2F0D9)
+                if val in ["明", "休", "有"]:
+                    return "background-color: #E2F0D9; color: black"
+                return ""
+
+            st.dataframe(df_out.style.map(highlight_cells))
 
             # Excel出力
             output = BytesIO()
@@ -500,23 +506,19 @@ if st.button("シフトを作成する", type="primary"):
             wb = load_workbook(output)
             ws = wb.active
             
+            # 薄い緑の定義
             green_fill = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
-            yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-            orange_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
+            # ==========================================
+            # 【修正】Excel色塗り: 明・休・有 をすべて緑に統一
+            # ==========================================
             for i, s in enumerate(staff, start=2):
                 for d in range(DAYS):
                     cell = ws.cell(row=i, column=d+2)
                     val = cell.value
-                    inp = req_input[s][d]
                     
-                    if inp == "有":
-                        cell.fill = orange_fill
-                        continue
-                    if inp == "休":
-                        cell.fill = yellow_fill
-                        continue
-                    if val == "休" or val == "明":
+                    # セルの文字が「明」「休」「有」のいずれかなら緑にする
+                    if val in ["明", "休", "有"]:
                         cell.fill = green_fill
 
             final_output = BytesIO()
@@ -578,4 +580,3 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
-
