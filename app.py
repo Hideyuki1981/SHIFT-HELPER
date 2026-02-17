@@ -21,7 +21,7 @@ MANUAL_TEXT = """
 * **ファイル名**: `staff.xlsx`
 * **シート構成**: 
     1. `staff`: スタッフ設定（必須）
-    2. `ng_pair`: 禁止ペア設定（任意・英語のまま）
+    2. `ng_pair`: 禁止ペア設定（任意）
 
 ### 2. staffシートの入力内容 (日本語カラム名)
 | カラム名 | 説明 |
@@ -60,7 +60,7 @@ MANUAL_TEXT = """
 # =====================
 st.set_page_config(page_title="シフト自動作成ツール", layout="wide")
 
-st.title("📅 シフト自動作成ツール (Ver.9.3)")
+st.title("📅 シフト自動作成ツール (Ver.9.4)")
 st.markdown("スタッフ設定ファイル(Excel)をアップロードして、作成ボタンを押してください。")
 
 # =====================
@@ -625,6 +625,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
