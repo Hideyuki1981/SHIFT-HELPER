@@ -547,12 +547,8 @@ if st.button("シフトを作成する", type="primary"):
             diag_status = diag_solver.Solve(diag_model)
 
             if diag_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-                st.markdown("### ⚠️ 人員不足レポート")
-                st.markdown("以下の日付・シフトで、スタッフの数が足りていません。")
-
                 error_rows = []
                 WEEKDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
-                
                 base_date = datetime.date(int(YEAR), int(MONTH), 1)
 
                 for d in range(DAYS):
@@ -566,22 +562,34 @@ if st.button("シフトを作成する", type="primary"):
                             req_val = int(edited_req_df.at[sh, wd_str])
                             actual_val = req_val - lack
                             error_rows.append({
-                                "日付": f"{d+1}日 ({wd_str})",
-                                "シフト": sh,
-                                "必要設定数": req_val,
-                                "確保可能数": actual_val,
-                                "不足数": f"MINUS {lack}"
+                                "date": f"{d+1}日({wd_str})",
+                                "shift": sh,
+                                "req": req_val,
+                                "act": actual_val,
+                                "lack": lack
                             })
                 
+                # ■■■ 変更点：具体的な箇条書き表示 ■■■
                 if error_rows:
-                    st.table(pd.DataFrame(error_rows).set_index("日付"))
-                    st.info("💡 **対策**: 該当日の設定人数を減らすか、スタッフの休み設定を見直してください。")
+                    st.markdown("### ⚠️ 人員不足レポート")
+                    st.error(f"合計 {len(error_rows)} 箇所で人員が足りていません。")
+                    
+                    for row in error_rows:
+                        # 読みやすい形式で出力
+                        st.markdown(
+                            f"- **{row['date']}** : **【{row['shift']}】** が **{row['lack']}名** 不足 "
+                            f"(必要: {row['req']}名 → 確保可能: {row['act']}名)"
+                        )
+                    
+                    st.markdown("---")
+                    st.info("💡 **対策**: 上記の日付の「必要人数」を減らすか、スタッフの「希望休」を取り下げて調整してください。")
                 else:
-                    st.write("人員数以外の複雑な制約で矛盾が生じている可能性があります。")
+                    st.warning("人員数は足りていますが、その他の制約（連勤制限やNGペアなど）で矛盾が生じています。")
             else:
                 st.error("人員数を無視してもシフトが組めません。Excelの入力ミスがないか確認してください。")
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
