@@ -442,7 +442,7 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
             500 * sum(next_day_off_penalty) + 
             200 * sum(no_leader_penalty) + 
             100 * sum(ng_pair_penalty) +
-            50 * sum(consecutive_off_penalty) +
+            # 50 * sum(consecutive_off_penalty) +  ←【削除】この行を消す
             50 * sum(support_penalty)
             - 1000 * sum(night_maximization_bonus)
         )
@@ -671,6 +671,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
