@@ -335,12 +335,15 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
     night_count = {}
     for s in staff:
         night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
+        
+        # 夜勤回数の計算式
         model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
     
-    limit_val = max_night_limit.get(s)
+        # 【修正箇所2】 夜勤回数上限の適用
+        limit_val = max_night_limit.get(s)
         if limit_val is not None and pd.notna(limit_val) and limit_val != "":
-            model.Add(night_count[s] <= int(limit_val)) 
-   
+            model.Add(night_count[s] <= int(limit_val))
+
     night_penalty = []
     dispatch_penalty = []
     night_maximization_bonus = []
@@ -571,3 +574,4 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
