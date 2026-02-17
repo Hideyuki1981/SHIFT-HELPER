@@ -351,38 +351,55 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                 no_leader_penalty.append(is_no_leader)
 
     # ==========================================
-    # 追加機能2: NGペア制約 (日勤帯のかぶり禁止)
+    # 追加機能2: NGペア制約 (日勤帯のかぶり禁止 ＆ 夜勤かぶり禁止)
     # ==========================================
     ng_pair_penalty = []
     
     for (p1, p2) in ng_pairs:
-        # 両方のスタッフが存在する場合のみチェック
         if p1 in staff and p2 in staff:
+            # 2人の所属グループを取得
+            g1 = staff_group.get(p1, "A")
+            g2 = staff_group.get(p2, "A")
+            
             for d in range(DAYS):
-                # p1が日勤帯(早日遅)にいるか
-                p1_vars = [x[p1, d, sh] for sh in DAY_SHIFT_GROUP if x[p1, d, sh] is not None]
-                p1_is_day = model.NewBoolVar(f"ng_{p1}_{d}")
-                if p1_vars:
-                    model.Add(sum(p1_vars) == 1).OnlyEnforceIf(p1_is_day)
-                    model.Add(sum(p1_vars) == 0).OnlyEnforceIf(p1_is_day.Not())
-                else:
-                    model.Add(p1_is_day == 0)
+                # ----------------------------------------------------------
+                # A. 日勤帯(早日遅)のNGチェック
+                #    → 【修正】「同じグループ同士」の場合のみ適用する
+                #      (グループが違うペアは、日勤が被ってもOKとする)
+                # ----------------------------------------------------------
+                if g1 == g2:
+                    # p1が日勤帯にいるか
+                    p1_vars = [x[p1, d, sh] for sh in DAY_SHIFT_GROUP if x[p1, d, sh] is not None]
+                    p1_is_day = model.NewBoolVar(f"ng_{p1}_{d}")
+                    if p1_vars:
+                        model.Add(sum(p1_vars) == 1).OnlyEnforceIf(p1_is_day)
+                        model.Add(sum(p1_vars) == 0).OnlyEnforceIf(p1_is_day.Not())
+                    else:
+                        model.Add(p1_is_day == 0)
 
-                # p2が日勤帯(早日遅)にいるか
-                p2_vars = [x[p2, d, sh] for sh in DAY_SHIFT_GROUP if x[p2, d, sh] is not None]
-                p2_is_day = model.NewBoolVar(f"ng_{p2}_{d}")
-                if p2_vars:
-                    model.Add(sum(p2_vars) == 1).OnlyEnforceIf(p2_is_day)
-                    model.Add(sum(p2_vars) == 0).OnlyEnforceIf(p2_is_day.Not())
-                else:
-                    model.Add(p2_is_day == 0)
+                    # p2が日勤帯にいるか
+                    p2_vars = [x[p2, d, sh] for sh in DAY_SHIFT_GROUP if x[p2, d, sh] is not None]
+                    p2_is_day = model.NewBoolVar(f"ng_{p2}_{d}")
+                    if p2_vars:
+                        model.Add(sum(p2_vars) == 1).OnlyEnforceIf(p2_is_day)
+                        model.Add(sum(p2_vars) == 0).OnlyEnforceIf(p2_is_day.Not())
+                    else:
+                        model.Add(p2_is_day == 0)
 
-                # 両方日勤帯ならNG
-                is_ng_clash = model.NewBoolVar(f"ng_clash_{p1}_{p2}_{d}")
-                model.AddBoolAnd([p1_is_day, p2_is_day]).OnlyEnforceIf(is_ng_clash)
-                model.AddBoolOr([p1_is_day.Not(), p2_is_day.Not()]).OnlyEnforceIf(is_ng_clash.Not())
-                
-                ng_pair_penalty.append(is_ng_clash)
+                    # 両方日勤帯ならNG (ペナルティ加算)
+                    is_ng_clash = model.NewBoolVar(f"ng_clash_{p1}_{p2}_{d}")
+                    model.AddBoolAnd([p1_is_day, p2_is_day]).OnlyEnforceIf(is_ng_clash)
+                    model.AddBoolOr([p1_is_day.Not(), p2_is_day.Not()]).OnlyEnforceIf(is_ng_clash.Not())
+                    
+                    ng_pair_penalty.append(is_ng_clash)
+
+                # ----------------------------------------------------------
+                # B. 夜勤のNGチェック
+                #    → グループ関係なく、すべてのNGペアで適用
+                # ----------------------------------------------------------
+                if x[p1, d, "夜"] is not None and x[p2, d, "夜"] is not None:
+                    # 夜勤被りは「禁止(ハード制約)」として設定
+                    model.Add(x[p1, d, "夜"] + x[p2, d, "夜"] <= 1)
 
     # ==========================================
     # 目的関数
@@ -689,6 +706,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
