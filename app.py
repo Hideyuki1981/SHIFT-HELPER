@@ -435,17 +435,15 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
 
     if not is_diagnostic:
         # 重みづけ設定
-        # no_leader_penalty: 常勤不在はかなり避けたい (200)
-        # ng_pair_penalty: NGペアも避けたいが、人員不足よりはマシ (100)
         model.Minimize(
             10 * sum(night_penalty) +
             100 * sum(dispatch_penalty) +
             100 * sum(balance_penalty) +
-            500 * sum(next_day_off_penalty) +
-            200 * sum(no_leader_penalty) +
+            500 * sum(next_day_off_penalty) + 
+            200 * sum(no_leader_penalty) + 
+            100 * sum(ng_pair_penalty) +
             50 * sum(consecutive_off_penalty) +
             50 * sum(support_penalty)
-            100 * sum(ng_pair_penalty)
             - 1000 * sum(night_maximization_bonus)
         )
     else:
@@ -673,6 +671,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
