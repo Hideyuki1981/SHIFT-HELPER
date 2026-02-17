@@ -366,7 +366,7 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         night_count[s] = model.NewIntVar(0, DAYS, f"night_{s}")
         model.Add(night_count[s] == sum(x[s, d, "夜"] for d in range(DAYS) if x[s, d, "夜"] is not None))
     
-　　# 【追加】③ 個人ごとの夜勤回数上限
+    # 【追加】③ 個人ごとの夜勤回数上限
     for s in staff:
         if max_night_limit[s] < 31: # 設定がある場合のみ
             model.Add(night_count[s] <= max_night_limit[s])
