@@ -474,6 +474,7 @@ if st.button("シフトを作成する", type="primary"):
         # ==========================================
         jp_to_en = {
             "名前": "name",
+            "グループ": "group", 
             "属性": "type",
             "公休数": "off_days",
             "早番": "can_early",
@@ -688,6 +689,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
