@@ -605,6 +605,11 @@ if st.button("シフトを作成する", type="primary"):
             # ==========================================
             # 【追加】曜日行の作成と挿入
             # ==========================================
+            WEEKDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"]
+            
+            # 基準日（月初）を取得
+            base_date = datetime.date(int(YEAR), int(MONTH), 1)
+            
             # 曜日のリストを作成
             weekdays_list = [WEEKDAY_NAMES[(base_date + datetime.timedelta(days=i)).weekday()] for i in range(DAYS)]
             
@@ -754,6 +759,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
