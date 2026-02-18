@@ -249,6 +249,20 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                 is_after_night = x[s, d-1, "夜"] if x[s, d-1, "夜"] is not None else 0
             model.Add(work_flag[s, d] == is_shifted + is_after_night)
 
+    # 最大連勤数の制約
+    for s in staff:
+        # Excelの指定値を取得。空欄なら6連勤まで
+        limit = limit_consecutive.get(s)
+        if pd.isna(limit) or limit == 0:
+            limit = 6
+        else:
+            limit = int(limit)
+
+        # (limit + 1)日間のウィンドウで、勤務日の合計が limit 以下になるようにする
+        # 例: 6連勤までなら、連続する7日間のうち勤務は6日まで（つまり7日連続はダメ）
+        for d in range(DAYS - limit):
+            model.Add(sum(work_flag[s, d + k] for k in range(limit + 1)) <= limit)
+            
     # 希望反映
     for s in staff:
         for d in range(DAYS):
@@ -759,6 +773,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
