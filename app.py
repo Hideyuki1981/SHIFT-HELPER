@@ -5,7 +5,7 @@ import datetime
 import calendar
 from io import BytesIO
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font
 
 # =====================
 # マニュアルの本文
@@ -553,6 +553,7 @@ if st.button("シフトを作成する", type="primary"):
                 
                 for d in range(DAYS):
                     v = ""
+                    # --- (中略: シフト判定ロジックは変更なし) ---
                     if req_input[s][d] == "有":
                         v = "有"
                         p_counts["有"] += 1
@@ -586,34 +587,67 @@ if st.button("シフトを作成する", type="primary"):
                 for c in count_cols:
                     count_data[c].append(p_counts[c])
             
+            # DataFrame作成
             df_out = pd.DataFrame(result, index=staff, columns=[f"{i+1}日" for i in range(DAYS)])
             
-            # ==========================================
-            # 【追加】結果表の左端に「グループ」列を追加
-            # ==========================================
-            # staff_dfからグループ情報を再取得
+            # グループ列の追加
             if "group" in staff_df.columns:
                 group_map = dict(zip(staff_df["name"], staff_df["group"]))
                 group_list = [group_map.get(s, "") for s in staff]
             else:
                 group_list = ["A"] * len(staff)
-
-            # 0番目(名前の次)に挿入
             df_out.insert(0, "グループ", group_list)
-            # ==========================================
 
+            # カウント列の追加
             for c in count_cols:
                 df_out[c] = count_data[c]
 
-            # 画面表示 (修正済み)
-            def highlight_cells(val):
-                if val in ["明", "休", "有"]:
-                    return "background-color: #E2F0D9; color: black"
-                return ""
+            # ==========================================
+            # 【追加】曜日行の作成と挿入
+            # ==========================================
+            # 曜日のリストを作成
+            weekdays_list = [WEEKDAY_NAMES[(base_date + datetime.timedelta(days=i)).weekday()] for i in range(DAYS)]
+            
+            # 曜日行データの作成 (グループ列などは空文字、カウント列も空)
+            day_row_data = [""] + weekdays_list + [""] * len(count_cols)
+            
+            # DataFrame化して結合 (index名を"曜日"とする)
+            df_day = pd.DataFrame([day_row_data], index=["曜日"], columns=df_out.columns)
+            df_out = pd.concat([df_day, df_out])
 
-            st.dataframe(df_out.style.map(highlight_cells))
+            # ==========================================
+            # 【修正】Web表示用スタイル関数 (曜日対応)
+            # ==========================================
+            def apply_styles(df):
+                styles = pd.DataFrame('', index=df.index, columns=df.columns)
+                
+                # 1. 全体の処理: 明・休・有 の背景色
+                for r in df.index:
+                    for c in df.columns:
+                        val = df.at[r, c]
+                        if val in ["明", "休", "有"]:
+                            styles.at[r, c] = "background-color: #E2F0D9; color: black"
+                
+                # 2. 曜日行の処理: 土(青), 日(赤)
+                if "曜日" in df.index:
+                    for c in df.columns:
+                        val = df.at["曜日", c]
+                        if val == "土":
+                            styles.at["曜日", c] = "color: blue; font-weight: bold"
+                        elif val == "日":
+                            styles.at["曜日", c] = "color: red; font-weight: bold"
+                        else:
+                            # 月～金は黒太字（曜日行のみ）
+                            if c not in ["グループ"] + count_cols: # 日付列のみ対象
+                                styles.at["曜日", c] = "color: black; font-weight: bold"
 
-            # Excel出力
+                return styles
+
+            st.dataframe(df_out.style.apply(apply_styles, axis=None))
+
+            # ==========================================
+            # Excel出力 (曜日行の着色対応)
+            # ==========================================
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_out.to_excel(writer, sheet_name='Result')
@@ -622,20 +656,35 @@ if st.button("シフトを作成する", type="primary"):
             wb = load_workbook(output)
             ws = wb.active
             
-            # 薄い緑の定義
             green_fill = PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid")
+            
+            # 行数の定義: 1行目=ヘッダ, 2行目=曜日, 3行目以降=スタッフ
+            # データが入っている最終列を取得
+            max_col = DAYS + 2  # Index(A) + Group(B) + Days...
 
-            # ==========================================
-            # 【修正】Excel色塗り: 明・休・有 をすべて緑に統一
-            # ==========================================
-            for i, s in enumerate(staff, start=2):
-                for d in range(DAYS):
-                    # 名前(A) -> グループ(B) -> 1日(C)... なので、日付データは C列(3) から始まる
-                    # d=0(1日) のとき column=3
-                    cell = ws.cell(row=i, column=d+3)  # ← ここを d+2 から d+3 に変更
-                    
+            # ------------------------------------------
+            # 1. 曜日行(2行目)のフォント設定
+            # ------------------------------------------
+            # データ開始列はC列(3)から
+            for col_num in range(3, DAYS + 3):
+                cell = ws.cell(row=2, column=col_num) # 2行目が曜日
+                val = cell.value
+                
+                if val == "土":
+                    cell.font = Font(color="0000FF", bold=True) # 青
+                elif val == "日":
+                    cell.font = Font(color="FF0000", bold=True) # 赤
+                else:
+                    cell.font = Font(color="000000", bold=True) # 黒
+
+            # ------------------------------------------
+            # 2. シフトデータ(3行目以降)の背景色設定
+            # ------------------------------------------
+            # スタッフ行は3行目からスタート
+            for r_idx in range(3, len(staff) + 3):
+                for col_num in range(3, DAYS + 3):
+                    cell = ws.cell(row=r_idx, column=col_num)
                     val = cell.value
-                    
                     if val in ["明", "休", "有"]:
                         cell.fill = green_fill
 
@@ -705,6 +754,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
