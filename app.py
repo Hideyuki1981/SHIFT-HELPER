@@ -177,11 +177,11 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
         for d in range(DAYS):
             model.Add(sum(x[s, d, sh] for sh in SHIFT_TYPES if x[s, d, sh] is not None) <= 1)
 
-    # ==========================================
-    # 【修正】人数制約 & グループ応援ペナルティ
+   # ==========================================
+    # 【修正】人数制約 (グループ応援なし・完全独立)
     # ==========================================
     shortage_vars = {} 
-    support_penalty = [] # 応援（自グループ不足）のペナルティ
+    support_penalty = [] # ※目的関数でのエラー回避のため空リストだけ残します
 
     # グループ情報の取得 (列がない場合は全員Aとする)
     if "group" in staff_df.columns:
@@ -199,44 +199,23 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
             req_b = int(req_df.at[f"{sh}B", wd_name])
             total_req = req_a + req_b
             
-            # そのシフトに入っている全スタッフの実数
-            active_staff_vars = [x[s, d, sh] for s in staff if x[s, d, sh] is not None]
-            total_active = sum(active_staff_vars)
+            # グループごとの実際のシフト投入人数
+            count_a = sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None and staff_group.get(s) == "A")
+            count_b = sum(x[s, d, sh] for s in staff if x[s, d, sh] is not None and staff_group.get(s) == "B")
 
-            # ----------------------------------
-            # 1. 合計人数の確保 (絶対遵守)
-            # ----------------------------------
             if not is_diagnostic:
-                model.Add(total_active == total_req)
+                # ----------------------------------
+                # 【変更箇所】応援を禁止し、グループごとに人数を完全固定
+                # ----------------------------------
+                model.Add(count_a == req_a)
+                model.Add(count_b == req_b)
             else:
+                # 診断モード用 (変更なし)
+                active_staff_vars = [x[s, d, sh] for s in staff if x[s, d, sh] is not None]
+                total_active = sum(active_staff_vars)
                 shortage = model.NewIntVar(0, total_req, f"shortage_{d}_{sh}")
                 shortage_vars[d, sh] = shortage
                 model.Add(total_active + shortage == total_req)
-
-            # ----------------------------------
-            # 2. グループごとの確保状況チェック (応援発生時はペナルティ)
-            # ----------------------------------
-            if not is_diagnostic and total_req > 0:
-                # グループAの実数
-                count_a = sum(x[s, d, sh] for s in staff 
-                              if x[s, d, sh] is not None and staff_group.get(s) == "A")
-                
-                # グループBの実数
-                count_b = sum(x[s, d, sh] for s in staff 
-                              if x[s, d, sh] is not None and staff_group.get(s) == "B")
-                
-                # Aの不足分 (req_a - count_a) を計算。不足がなければ0
-                # 不足している＝Bが応援に入っている状態
-                shortage_a_var = model.NewIntVar(0, len(staff), f"short_a_{d}_{sh}")
-                model.Add(shortage_a_var >= req_a - count_a)
-                
-                # Bの不足分
-                shortage_b_var = model.NewIntVar(0, len(staff), f"short_b_{d}_{sh}")
-                model.Add(shortage_b_var >= req_b - count_b)
-                
-                # ペナルティに追加
-                support_penalty.append(shortage_a_var)
-                support_penalty.append(shortage_b_var)
 
     # 勤務フラグ作成
     for s in staff:
@@ -773,6 +752,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
