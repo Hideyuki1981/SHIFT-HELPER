@@ -302,6 +302,15 @@ def create_shift_model(staff_df, ng_pairs, year, month, req_df, is_diagnostic=Fa
                     next_day_off_penalty.append(violation)
 
     # ==========================================
+    # 【追加】遅番ルール: 遅番の翌日は早番禁止
+    # ==========================================
+    for s in staff:
+        for d in range(DAYS - 1): # 翌日(d+1)を確認するため DAYS - 1 としています
+            if x[s, d, "遅"] is not None and x[s, d+1, "早"] is not None:
+                # 前日(d)が遅番の場合、翌日(d+1)の早番を0（不可）に固定する
+                model.Add(x[s, d+1, "早"] == 0).OnlyEnforceIf(x[s, d, "遅"])
+                
+    # ==========================================
     # 【修正】連休制限: 「常勤」のみ、自動割り当ての「休」は連続2回まで
     # ==========================================
     for s in staff:
@@ -770,6 +779,7 @@ if st.button("シフトを作成する", type="primary"):
 
     except Exception as e:
         st.error(f"システムエラーが発生しました: {e}")
+
 
 
 
